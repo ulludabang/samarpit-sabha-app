@@ -78,7 +78,6 @@ ALTER TABLE public.sabhas ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attendance ENABLE ROW LEVEL SECURITY;
 
 -- 8. RLS Policies: Allow authenticated users (signed in via Google OAuth) full CRUD access
--- Drop existing policies if reapplying script
 DROP POLICY IF EXISTS "Authenticated users can select children" ON public.children;
 DROP POLICY IF EXISTS "Authenticated users can insert children" ON public.children;
 DROP POLICY IF EXISTS "Authenticated users can update children" ON public.children;
@@ -156,8 +155,7 @@ CREATE POLICY "Authenticated users can delete attendance"
     TO authenticated
     USING (true);
 
--- 9. Enable Realtime Replication for instant multi-device live sync
--- 10. Create 'app_users' (Admin & Permission System)
+-- 9. Create 'app_users' Table (Administrators and Allowance Requests)
 CREATE TABLE IF NOT EXISTS public.app_users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT NOT NULL UNIQUE,
@@ -174,7 +172,7 @@ INSERT INTO public.app_users (email, name, role, status)
 VALUES ('ulludabang@gmail.com', 'Master Admin', 'admin', 'approved')
 ON CONFLICT (email) DO UPDATE SET role = 'admin', status = 'approved';
 
--- 11. Create 'activity_logs' Table
+-- 10. Create 'activity_logs' Table
 CREATE TABLE IF NOT EXISTS public.activity_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     action TEXT NOT NULL,
@@ -193,21 +191,31 @@ ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.activity_logs ENABLE ROW LEVEL SECURITY;
 
 -- App users RLS
-DROP POLICY IF EXISTS "Authenticated users can select app_users" ON public.app_users;
-CREATE POLICY "Authenticated users can select app_users" ON public.app_users FOR SELECT TO authenticated USING (true);
+DROP POLICY IF EXISTS "Allow select app_users" ON public.app_users;
+CREATE POLICY "Allow select app_users" ON public.app_users FOR SELECT USING (true);
 
-DROP POLICY IF EXISTS "Authenticated users can insert/update app_users" ON public.app_users;
-CREATE POLICY "Authenticated users can insert/update app_users" ON public.app_users FOR ALL TO authenticated USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Allow all app_users" ON public.app_users;
+CREATE POLICY "Allow all app_users" ON public.app_users FOR ALL USING (true) WITH CHECK (true);
 
 -- Activity logs RLS
-DROP POLICY IF EXISTS "Authenticated users can select activity_logs" ON public.activity_logs;
-CREATE POLICY "Authenticated users can select activity_logs" ON public.activity_logs FOR SELECT TO authenticated USING (true);
+DROP POLICY IF EXISTS "Allow select activity_logs" ON public.activity_logs;
+CREATE POLICY "Allow select activity_logs" ON public.activity_logs FOR SELECT USING (true);
 
-DROP POLICY IF EXISTS "Authenticated users can insert activity_logs" ON public.activity_logs;
-CREATE POLICY "Authenticated users can insert activity_logs" ON public.activity_logs FOR INSERT TO authenticated WITH CHECK (true);
+DROP POLICY IF EXISTS "Allow insert activity_logs" ON public.activity_logs;
+CREATE POLICY "Allow insert activity_logs" ON public.activity_logs FOR INSERT WITH CHECK (true);
 
--- Realtime Publication for instant multi-device live sync
-BEGIN;
-  DROP PUBLICATION IF EXISTS supabase_realtime;
-  CREATE PUBLICATION supabase_realtime FOR TABLE public.children, public.sabhas, public.attendance, public.app_users, public.activity_logs;
-COMMIT;
+-- 11. Realtime Publication for instant multi-device live sync
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    CREATE PUBLICATION supabase_realtime FOR ALL TABLES;
+  ELSE
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.children;
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.sabhas;
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.attendance;
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.app_users;
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;

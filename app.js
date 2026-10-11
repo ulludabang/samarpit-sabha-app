@@ -23,6 +23,7 @@ let S = {
 
 let appUsers = [];
 let activityLogs = [];
+let dbMissingUsersTable = false;
 
 let tab = 'sabha';
 let page = 'cur';
@@ -111,7 +112,15 @@ function getUserStatus() {
 }
 
 function getPendingRequests() {
-  return appUsers.filter(u => u.status === 'pending' && u.email.toLowerCase() !== MASTER_ADMIN_EMAIL.toLowerCase());
+  const seen = new Set();
+  return appUsers.filter(u => {
+    if (!u || !u.email) return false;
+    const em = u.email.toLowerCase().trim();
+    if (em === MASTER_ADMIN_EMAIL.toLowerCase()) return false;
+    if (seen.has(em)) return false;
+    seen.add(em);
+    return u.status && u.status.toLowerCase() === 'pending';
+  });
 }
 
 // ------------------------------------------------------------------------------
@@ -276,60 +285,62 @@ async function registerOrCheckUser() {
   const avatar = currentUser.user_metadata?.avatar_url || currentUser.user_metadata?.picture || null;
   const isMaster = email === MASTER_ADMIN_EMAIL.toLowerCase();
 
-  // Master Admin is always ensured locally
-  if (isMaster) {
-    const existing = appUsers.find(u => u.email.toLowerCase() === email);
-    if (existing) {
-      existing.role = 'admin';
-      existing.status = 'approved';
-    } else {
-      appUsers.push({ email, name, avatar, role: 'admin', status: 'approved' });
+  // 1. AUTOMATIC LOCAL REGISTRATION: Ensure user exists in memory & cache immediately
+  let user = appUsers.find(u => u.email && u.email.toLowerCase() === email);
+  if (!user) {
+    user = {
+      email,
+      name,
+      avatar,
+      role: isMaster ? 'admin' : 'viewer',
+      status: isMaster ? 'approved' : 'pending',
+      created_at: new Date().toISOString()
+    };
+    appUsers.push(user);
+    if (!isMaster) {
+      logActivity('Allowance Request Registered', `New user ${name} (${email}) logged in and was added to pending requests.`);
+    }
+  } else {
+    user.name = name;
+    if (avatar) user.avatar = avatar;
+    if (isMaster) {
+      user.role = 'admin';
+      user.status = 'approved';
     }
   }
 
-  if (!supabaseClient) return;
+  saveToLocalCache();
+  updateAuthUI();
 
-  try {
-    const { data: existingUser, error: fetchErr } = await supabaseClient
-      .from('app_users')
-      .select('*')
-      .eq('email', email)
-      .maybeSingle();
-
-    if (!existingUser) {
-      // First time login! Register user with pending allowance request
-      const initialRole = isMaster ? 'admin' : 'viewer';
-      const initialStatus = isMaster ? 'approved' : 'pending';
-
-      const { data: inserted, error: insertErr } = await supabaseClient
+  // 2. Persist to Supabase app_users table
+  if (supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient
         .from('app_users')
-        .insert([{
+        .upsert({
           email,
           name,
           avatar,
-          role: initialRole,
-          status: initialStatus
-        }])
-        .select()
-        .single();
+          role: user.role,
+          status: user.status,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'email' })
+        .select();
 
-      if (!insertErr && inserted) {
-        appUsers.push(inserted);
-        if (!isMaster) {
-          await logActivity('Sent request for Admin allowance', `New user ${name} (${email}) logged in and requested admin access.`);
-        }
+      if (error) {
+        dbMissingUsersTable = true;
+        console.warn('[Samarpit] app_users table missing or inaccessible:', error.message);
+      } else {
+        dbMissingUsersTable = false;
       }
-    } else {
-      // Ensure master admin stays admin
-      if (isMaster && (existingUser.role !== 'admin' || existingUser.status !== 'approved')) {
-        await supabaseClient.from('app_users').update({ role: 'admin', status: 'approved' }).eq('email', email);
-        existingUser.role = 'admin';
-        existingUser.status = 'approved';
-      }
+    } catch (err) {
+      dbMissingUsersTable = true;
+      console.warn('[Samarpit] App user check warning:', err.message);
     }
-  } catch (err) {
-    console.warn('[Samarpit] App user check warning:', err.message);
   }
+
+  saveToLocalCache();
+  updateAuthUI();
 }
 
 async function approveUserAsAdmin(targetEmail) {
@@ -339,13 +350,13 @@ async function approveUserAsAdmin(targetEmail) {
   }
 
   const emailNorm = targetEmail.toLowerCase().trim();
-  let user = appUsers.find(u => u.email && u.email.toLowerCase() === emailNorm);
+  let user = appUsers.find(u => u.email && u.email.toLowerCase().trim() === emailNorm);
 
   if (user) {
     user.role = 'admin';
     user.status = 'approved';
   } else {
-    user = { email: emailNorm, role: 'admin', status: 'approved' };
+    user = { email: emailNorm, name: emailNorm.split('@')[0], role: 'admin', status: 'approved' };
     appUsers.push(user);
   }
 
@@ -356,14 +367,17 @@ async function approveUserAsAdmin(targetEmail) {
         .upsert({
           email: emailNorm,
           role: 'admin',
-          status: 'approved'
+          status: 'approved',
+          updated_at: new Date().toISOString()
         }, { onConflict: 'email' });
 
-      if (error) throw error;
+      if (error) {
+        dbMissingUsersTable = true;
+        console.warn('[Samarpit] Cloud approve notice:', error.message);
+      }
     } catch (err) {
-      console.error('[Samarpit] Approve error:', err);
-      toast(err.message || 'Error updating user role', 'error');
-      return;
+      dbMissingUsersTable = true;
+      console.warn('[Samarpit] Approve user cloud warning:', err.message);
     }
   }
 
@@ -371,6 +385,44 @@ async function approveUserAsAdmin(targetEmail) {
   saveToLocalCache();
   updateAuthUI();
   toast(`Approved ${emailNorm} as Admin!`, 'ok');
+  openAdminModal();
+}
+
+async function dismissAllowanceRequest(targetEmail) {
+  if (!isUserAdmin()) {
+    toast('Only admins can dismiss requests.', 'error');
+    return;
+  }
+
+  const emailNorm = targetEmail.toLowerCase().trim();
+  let user = appUsers.find(u => u.email && u.email.toLowerCase().trim() === emailNorm);
+
+  if (user) {
+    user.role = 'viewer';
+    user.status = 'approved';
+  }
+
+  if (supabaseClient) {
+    try {
+      const { error } = await supabaseClient
+        .from('app_users')
+        .update({ role: 'viewer', status: 'approved', updated_at: new Date().toISOString() })
+        .eq('email', emailNorm);
+
+      if (error) {
+        dbMissingUsersTable = true;
+        console.warn('[Samarpit] Cloud dismiss notice:', error.message);
+      }
+    } catch (err) {
+      dbMissingUsersTable = true;
+      console.warn('[Samarpit] Dismiss user cloud warning:', err.message);
+    }
+  }
+
+  await logActivity(`Dismissed admin request for ${emailNorm}`, 'User remains Viewer.');
+  saveToLocalCache();
+  updateAuthUI();
+  toast(`Request dismissed. ${emailNorm} remains Viewer.`, 'ok');
   openAdminModal();
 }
 
@@ -386,14 +438,21 @@ async function revokeAdminAccess(targetEmail) {
     return;
   }
 
-  const user = appUsers.find(u => u.email && u.email.toLowerCase() === emailNorm);
+  const user = appUsers.find(u => u.email && u.email.toLowerCase().trim() === emailNorm);
   if (user) {
     user.role = 'viewer';
     user.status = 'approved';
   }
 
   if (supabaseClient) {
-    await supabaseClient.from('app_users').update({ role: 'viewer', status: 'approved' }).eq('email', emailNorm);
+    try {
+      await supabaseClient
+        .from('app_users')
+        .update({ role: 'viewer', status: 'approved', updated_at: new Date().toISOString() })
+        .eq('email', emailNorm);
+    } catch (err) {
+      console.warn('[Samarpit] Revoke admin error:', err.message);
+    }
   }
 
   await logActivity(`Changed ${emailNorm} to Viewer`, 'Admin access revoked.');
@@ -537,32 +596,56 @@ async function syncUsersAndLogs() {
   if (!supabaseClient) return;
 
   try {
-    // Fetch users
-    const { data: uData } = await supabaseClient
+    // 1. Fetch users from Supabase
+    const { data: uData, error: uErr } = await supabaseClient
       .from('app_users')
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (uData) {
-      appUsers = uData;
+    if (uErr) {
+      dbMissingUsersTable = true;
+      console.warn('[Samarpit] app_users query warning:', uErr.message);
+    } else if (uData) {
+      dbMissingUsersTable = false;
+      const cloudMap = new Map();
+      uData.forEach(u => {
+        if (u.email) cloudMap.set(u.email.toLowerCase().trim(), u);
+      });
+
+      // Retain any pending or new users in memory/local storage that aren't yet in cloud
+      appUsers.forEach(u => {
+        if (u.email && !cloudMap.has(u.email.toLowerCase().trim())) {
+          cloudMap.set(u.email.toLowerCase().trim(), u);
+        }
+      });
+      appUsers = Array.from(cloudMap.values());
     }
 
-    // Always ensure master admin in appUsers list
-    if (!appUsers.some(u => u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase())) {
+    // Always ensure master admin is in appUsers list
+    const master = appUsers.find(u => u.email && u.email.toLowerCase().trim() === MASTER_ADMIN_EMAIL.toLowerCase());
+    if (!master) {
       appUsers.push({ email: MASTER_ADMIN_EMAIL, name: 'Master Admin', role: 'admin', status: 'approved' });
+    } else {
+      master.role = 'admin';
+      master.status = 'approved';
     }
 
-    // Fetch activity logs
-    const { data: lData } = await supabaseClient
+    // 2. Fetch activity logs from Supabase
+    const { data: lData, error: lErr } = await supabaseClient
       .from('activity_logs')
       .select('*')
       .order('created_at', { ascending: false })
       .limit(100);
 
-    if (lData) {
-      activityLogs = lData;
+    if (lErr) {
+      console.warn('[Samarpit] activity_logs query warning:', lErr.message);
+    } else if (lData) {
+      const cloudIds = new Set(lData.map(l => l.id));
+      const localOnly = activityLogs.filter(l => !cloudIds.has(l.id));
+      activityLogs = [...lData, ...localOnly].slice(0, 150);
     }
 
+    saveToLocalCache();
     updateAuthUI();
     if (tab === 'logs') render();
   } catch (e) {
@@ -1268,7 +1351,85 @@ function openAdminModal() {
   }
 
   const pendingList = getPendingRequests();
-  const currentAdmins = appUsers.filter(u => u.role === 'admin' || u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase());
+  
+  // Deduplicate and prepare current admins list
+  const seenAdmins = new Set();
+  const currentAdmins = [];
+  
+  // Master admin first
+  currentAdmins.push({
+    email: MASTER_ADMIN_EMAIL,
+    name: 'Master Admin',
+    role: 'admin',
+    status: 'approved'
+  });
+  seenAdmins.add(MASTER_ADMIN_EMAIL.toLowerCase());
+
+  appUsers.forEach(u => {
+    if (!u || !u.email) return;
+    const em = u.email.toLowerCase().trim();
+    if (seenAdmins.has(em)) return;
+    if (u.role === 'admin' && u.status === 'approved') {
+      seenAdmins.add(em);
+      currentAdmins.push(u);
+    }
+  });
+
+  const setupSql = `-- SAMARPIT IRANIWADI - App Users & Audit Logs Setup
+CREATE TABLE IF NOT EXISTS public.app_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    avatar TEXT,
+    role TEXT NOT NULL DEFAULT 'viewer',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+INSERT INTO public.app_users (email, name, role, status)
+VALUES ('ulludabang@gmail.com', 'Master Admin', 'admin', 'approved')
+ON CONFLICT (email) DO UPDATE SET role = 'admin', status = 'approved';
+
+CREATE TABLE IF NOT EXISTS public.activity_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    action TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    user_name TEXT,
+    user_avatar TEXT,
+    details TEXT,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_logs_created ON public.activity_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_app_users_email ON public.app_users(email);
+
+ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.activity_logs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow select app_users" ON public.app_users;
+CREATE POLICY "Allow select app_users" ON public.app_users FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Allow all app_users" ON public.app_users;
+CREATE POLICY "Allow all app_users" ON public.app_users FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow select activity_logs" ON public.activity_logs;
+CREATE POLICY "Allow select activity_logs" ON public.activity_logs FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Allow insert activity_logs" ON public.activity_logs;
+CREATE POLICY "Allow insert activity_logs" ON public.activity_logs FOR INSERT WITH CHECK (true);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    CREATE PUBLICATION supabase_realtime FOR ALL TABLES;
+  ELSE
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.app_users;
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;`;
 
   dlg.innerHTML = `
     <div style="padding: 2px 0;">
@@ -1280,35 +1441,55 @@ function openAdminModal() {
         Manage allowance requests and administrators for Samarpit Iraniwadi.
       </p>
 
+      ${dbMissingUsersTable ? `
+        <div style="background:#fff8e1; border:1.5px solid #ffe082; border-radius:12px; padding:12px 14px; margin-bottom:16px; color:#5d4037;">
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+            <span style="font-size:20px;">⚠️</span>
+            <strong style="color:#b26a00; font-size:14px;">Cloud Users Table Not Yet Initialized</strong>
+          </div>
+          <p style="font-size:12.5px; line-height:1.45; margin:0 0 10px; color:#6d4c41;">
+            To sync allowance requests across all users' devices in real time, run the quick SQL script in your Supabase SQL Editor.
+          </p>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button type="button" class="btn sm" id="btn-copy-setup-sql" style="font-size:12.5px; padding:5px 12px; background:#e65100; color:#fff;">📋 Copy Setup SQL</button>
+            <a href="https://supabase.com/dashboard/project/bsefanprsdzyndcjuhfo/sql/new" target="_blank" rel="noopener" class="btn sm ghost" style="font-size:12.5px; padding:5px 12px; text-decoration:none; color:#e65100; border-color:#e65100;">Open Supabase SQL Editor ↗</a>
+          </div>
+        </div>
+      ` : ''}
+
       <h3 style="font-size:16px;margin: 16px 0 8px;">⏳ Pending Allowance Requests (${pendingList.length})</h3>
       ${pendingList.length === 0 ? `
-        <div class="card" style="padding: 12px; text-align: center;">
-          <p class="meta" style="margin:0;">No pending allowance requests. When someone new logs in, their request will appear here.</p>
+        <div class="card" style="padding: 16px; text-align: center;">
+          <p class="meta" style="margin:0;">No pending allowance requests.<br>When someone new logs in, their request will automatically appear here!</p>
         </div>
       ` : pendingList.map(u => `
         <div class="pending-user-card">
-          <div style="display:flex;align-items:center;gap:10px;">
+          <div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">
             ${u.avatar ? `<img src="${esc(u.avatar)}" class="user-avatar" referrerpolicy="no-referrer">` : `<div class="user-avatar" style="display:flex;align-items:center;justify-content:center;font-weight:700;">${(u.name || u.email)[0].toUpperCase()}</div>`}
-            <div>
-              <strong>${esc(u.name || u.email.split('@')[0])}</strong><br>
-              <span class="meta" style="font-size:12.5px;">${esc(u.email)}</span>
+            <div style="min-width:0;">
+              <strong style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(u.name || u.email.split('@')[0])}</strong>
+              <span class="meta" style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;">${esc(u.email)}</span>
             </div>
           </div>
-          <button class="btn btn-approve" data-act="approve-admin" data-email="${esc(u.email)}">Approve as Admin</button>
+          <div style="display:flex;gap:6px;flex-shrink:0;">
+            <button class="btn btn-approve" data-act="approve-admin" data-email="${esc(u.email)}">Approve Admin</button>
+            <button class="btn ghost sm" data-act="dismiss-request" data-email="${esc(u.email)}" title="Keep as Viewer">Dismiss</button>
+          </div>
         </div>
       `).join('')}
 
       <h3 style="font-size:16px;margin: 20px 0 8px;">👑 Current Administrators</h3>
       <div class="card" style="padding: 8px 12px;">
         ${currentAdmins.map(u => {
-          const isMaster = u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase();
+          const isMaster = u.email.toLowerCase().trim() === MASTER_ADMIN_EMAIL.toLowerCase();
+          const isCurrent = currentUser && u.email.toLowerCase().trim() === currentUser.email.toLowerCase().trim();
           return `
           <div class="row" style="padding: 8px 0; border-bottom: 1px solid var(--line);">
             <div>
               <strong>${esc(u.name || u.email.split('@')[0])}</strong> ${isMaster ? '<span class="chip" style="font-size:11px;padding:1px 6px;">Master Admin</span>' : ''}<br>
               <span class="meta" style="font-size:12px;">${esc(u.email)}</span>
             </div>
-            ${(!isMaster && u.email.toLowerCase() !== currentUser.email.toLowerCase()) ? `
+            ${(!isMaster && !isCurrent) ? `
               <button class="btn ghost sm danger" data-act="revoke-admin" data-email="${esc(u.email)}">Demote</button>
             ` : ''}
           </div>`;
@@ -1317,7 +1498,7 @@ function openAdminModal() {
 
       <h3 style="font-size:16px;margin: 20px 0 8px;">➕ Add Administrator by Email</h3>
       <form id="form-direct-add-admin" class="row" style="gap:8px;">
-        <input id="direct_admin_email" type="email" placeholder="karyakar@gmail.com" required style="padding:8px 12px;">
+        <input id="direct_admin_email" type="email" placeholder="karyakar@gmail.com" required style="padding:8px 12px;flex:1;">
         <button class="btn sm" type="submit" style="white-space:nowrap;">Add Admin</button>
       </form>
     </div>
@@ -1327,6 +1508,19 @@ function openAdminModal() {
 
   $('#admin-modal-cx').onclick = () => dlg.close();
 
+  // Handle Copy Setup SQL button
+  const copyBtn = $('#btn-copy-setup-sql');
+  if (copyBtn) {
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(setupSql);
+        toast('Setup SQL copied to clipboard! Paste in Supabase SQL Editor and click Run.', 'ok');
+      } catch (e) {
+        toast('Please copy schema from schema.sql in GitHub repo.', 'info');
+      }
+    };
+  }
+
   // Handle Approve button
   dlg.querySelectorAll('[data-act="approve-admin"]').forEach(btn => {
     btn.onclick = async () => {
@@ -1334,6 +1528,15 @@ function openAdminModal() {
       btn.disabled = true;
       btn.innerText = 'Approving...';
       await approveUserAsAdmin(email);
+    };
+  });
+
+  // Handle Dismiss button
+  dlg.querySelectorAll('[data-act="dismiss-request"]').forEach(btn => {
+    btn.onclick = async () => {
+      const email = btn.dataset.email;
+      btn.disabled = true;
+      await dismissAllowanceRequest(email);
     };
   });
 
