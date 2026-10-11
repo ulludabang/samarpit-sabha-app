@@ -36,7 +36,7 @@
       </div>
     </div>
     <div style="margin-top: 8px; display: flex; align-items: center; justify-content: space-between;">
-      <span id="status-badge" class="chip-status offline" title="Connection status">○ Local / Demo Mode</span>
+      <span id="status-badge" class="chip-status offline" title="Connection status" style="display:none;">○ Local / Demo Mode</span>
     </div>
   </header>
 
@@ -45,8 +45,8 @@
     <main id="view" role="main"></main>
   </div>
 
-  <!-- Bottom Navigation Bar for Mobile and Desktop -->
-  <nav class="tabs" aria-label="Sections">
+  <!-- Bottom Navigation Bar for Mobile and Desktop (Shown only when authenticated) -->
+  <nav class="tabs" aria-label="Sections" style="display:none;">
     <button data-tab="sabha" aria-current="true">
       <span style="font-size:18px;">📅</span>
       <span>Sabha</span>

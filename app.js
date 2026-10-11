@@ -187,6 +187,8 @@ async function handleSignOut() {
     toast(error.message, 'error');
   } else {
     currentUser = null;
+    S = { children: [], sabhas: [], att: {} };
+    localStorage.removeItem(STORAGE_KEYS.STATE);
     updateAuthUI();
     toast('Signed out successfully', 'ok');
     render();
@@ -605,7 +607,46 @@ function kidList() {
   }).join('');
 }
 
+function loginGateView() {
+  return `
+  <div class="login-gate-container">
+    <div class="login-gate-card">
+      <div style="font-size: 50px; margin-bottom: 12px; line-height: 1;">🔐</div>
+      <h2 style="margin: 0 0 10px; font-size: 23px;">Sign In Required</h2>
+      <p class="meta" style="margin-bottom: 24px; font-size: 15px; line-height: 1.5;">
+        Access to <strong>SAMARPIT IRANIWADI</strong> records, attendance, and sabha schedules is restricted. Please sign in with your Google account to enter.
+      </p>
+      <button class="btn btn-google" id="btn-gate-signin" style="width: 100%; justify-content: center; padding: 12px 20px; font-size: 16px; border-radius: 12px;">
+        <svg width="18" height="18" viewBox="0 0 24 24" style="margin-right: 8px;"><path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.65v3h3.86c2.26-2.09 3.685-5.17 3.685-9.09z"/><path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.37 24 12 24z"/><path fill="#FBBC05" d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09z"/><path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"/></svg>
+        <span>Sign in with Google</span>
+      </button>
+      <div style="margin-top: 22px; border-top: 1px solid var(--line); padding-top: 14px; width: 100%;">
+        <span class="meta" style="font-size: 13px;">🔒 Authorized karyakars and teachers only</span>
+      </div>
+    </div>
+  </div>`;
+}
+
 function render() {
+  const tabsNav = document.querySelector('.tabs');
+  const statusBadge = $('#status-badge');
+
+  if (!currentUser) {
+    if (tabsNav) tabsNav.style.display = 'none';
+    if (statusBadge) statusBadge.style.display = 'none';
+    const mainView = $('#view');
+    if (mainView) {
+      mainView.innerHTML = loginGateView();
+      const btnGate = $('#btn-gate-signin');
+      if (btnGate) btnGate.onclick = handleSignIn;
+    }
+    return;
+  }
+
+  // Logged-in view: show navigation and active tab content
+  if (tabsNav) tabsNav.style.display = 'flex';
+  if (statusBadge) statusBadge.style.display = 'inline-flex';
+
   document.querySelectorAll('.tabs button').forEach(b => {
     b.setAttribute('aria-current', String(b.dataset.tab === tab));
   });
@@ -847,13 +888,21 @@ if (btnSettings) {
 // ------------------------------------------------------------------------------
 
 (async function startup() {
-  loadLocalCache();
-  updateAuthUI();
+  // Hide navigation tabs initially until authentication is verified
+  const tabsNav = document.querySelector('.tabs');
+  const statusBadge = $('#status-badge');
+  if (tabsNav) tabsNav.style.display = 'none';
+  if (statusBadge) statusBadge.style.display = 'none';
+
   render();
 
-  // Try connecting to Supabase
+  // Try connecting to Supabase and verify session
   await initSupabase();
   if (supabaseClient && currentUser) {
+    loadLocalCache();
     await syncFromCloud();
+  } else {
+    updateAuthUI();
+    render();
   }
 })();
