@@ -31,7 +31,7 @@
       ]
     },
     {
-      "source": "/(styles.css|app.js|config.js)",
+      "source": "/(styles.css|app.js|config.js|manifest.json|sw.js)",
       "headers": [
         {
           "key": "Cache-Control",

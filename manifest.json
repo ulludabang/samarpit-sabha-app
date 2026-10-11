@@ -1,0 +1,25 @@
+{
+  "name": "SAMARPIT IRANIWADI",
+  "short_name": "Samarpit Sabha",
+  "description": "Bhulku records, attendance and sabha schedule",
+  "start_url": "/",
+  "id": "/",
+  "display": "standalone",
+  "background_color": "#fff4e6",
+  "theme_color": "#ec7a0c",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
