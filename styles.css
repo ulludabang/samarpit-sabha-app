@@ -579,3 +579,114 @@ dialog::backdrop {
   align-items: center;
 }
 
+/* Role Badges */
+.badge-role {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  padding: 2px 7px;
+  border-radius: 99px;
+  text-transform: uppercase;
+}
+.badge-role.admin {
+  background: #fef08a;
+  color: #854d0e;
+  border: 1px solid #eab308;
+}
+.badge-role.viewer {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--accent-ink);
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+/* Activity Logs */
+.log-card {
+  display: flex;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  margin-bottom: 10px;
+  box-shadow: var(--shadow);
+}
+.log-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--soft);
+  flex-shrink: 0;
+}
+.log-avatar-placeholder {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--soft);
+  color: var(--accent-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.log-body {
+  flex: 1;
+  min-width: 0;
+}
+.log-action-text {
+  font-weight: 600;
+  font-size: 14.5px;
+  color: var(--ink);
+  margin-bottom: 3px;
+  word-break: break-word;
+}
+.log-meta-line {
+  font-size: 12.5px;
+  color: var(--mute);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+/* Admin Panel & Allowance Requests */
+.pending-user-card {
+  background: var(--soft);
+  border: 1.5px solid var(--accent);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.btn-approve {
+  background: var(--ok);
+  color: #fff;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.btn-approve:hover {
+  background: #145336;
+}
+
+/* Readonly Notice Banner */
+.readonly-banner {
+  background: var(--soft);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 13.5px;
+  color: var(--accent-text);
+  margin: 10px 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+

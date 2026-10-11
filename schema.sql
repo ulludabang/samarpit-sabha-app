@@ -157,8 +157,57 @@ CREATE POLICY "Authenticated users can delete attendance"
     USING (true);
 
 -- 9. Enable Realtime Replication for instant multi-device live sync
--- (When one teacher/karyakar marks attendance, other open devices update instantly)
+-- 10. Create 'app_users' (Admin & Permission System)
+CREATE TABLE IF NOT EXISTS public.app_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    avatar TEXT,
+    role TEXT NOT NULL DEFAULT 'viewer', -- 'admin', 'viewer'
+    status TEXT NOT NULL DEFAULT 'pending', -- 'approved', 'pending'
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Pre-seed Master Admin ulludabang@gmail.com
+INSERT INTO public.app_users (email, name, role, status)
+VALUES ('ulludabang@gmail.com', 'Master Admin', 'admin', 'approved')
+ON CONFLICT (email) DO UPDATE SET role = 'admin', status = 'approved';
+
+-- 11. Create 'activity_logs' Table
+CREATE TABLE IF NOT EXISTS public.activity_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    action TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    user_name TEXT,
+    user_avatar TEXT,
+    details TEXT,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_logs_created ON public.activity_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_app_users_email ON public.app_users(email);
+
+-- Enable RLS
+ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.activity_logs ENABLE ROW LEVEL SECURITY;
+
+-- App users RLS
+DROP POLICY IF EXISTS "Authenticated users can select app_users" ON public.app_users;
+CREATE POLICY "Authenticated users can select app_users" ON public.app_users FOR SELECT TO authenticated USING (true);
+
+DROP POLICY IF EXISTS "Authenticated users can insert/update app_users" ON public.app_users;
+CREATE POLICY "Authenticated users can insert/update app_users" ON public.app_users FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- Activity logs RLS
+DROP POLICY IF EXISTS "Authenticated users can select activity_logs" ON public.activity_logs;
+CREATE POLICY "Authenticated users can select activity_logs" ON public.activity_logs FOR SELECT TO authenticated USING (true);
+
+DROP POLICY IF EXISTS "Authenticated users can insert activity_logs" ON public.activity_logs;
+CREATE POLICY "Authenticated users can insert activity_logs" ON public.activity_logs FOR INSERT TO authenticated WITH CHECK (true);
+
+-- Realtime Publication for instant multi-device live sync
 BEGIN;
   DROP PUBLICATION IF EXISTS supabase_realtime;
-  CREATE PUBLICATION supabase_realtime FOR TABLE public.children, public.sabhas, public.attendance;
+  CREATE PUBLICATION supabase_realtime FOR TABLE public.children, public.sabhas, public.attendance, public.app_users, public.activity_logs;
 COMMIT;

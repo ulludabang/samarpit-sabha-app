@@ -1,12 +1,17 @@
 // ==============================================================================
 // SAMARPIT IRANIWADI - Application Logic
-// Features: Google OAuth, PostgreSQL Sync via Supabase, Offline Cache, Realtime
+// Features: Google OAuth, Role-Based Access Control, Activity Audit Logs,
+//           Multi-Device Realtime Sync, Supabase PostgreSQL, Offline Cache
 // ==============================================================================
+
+const MASTER_ADMIN_EMAIL = 'ulludabang@gmail.com';
 
 const STORAGE_KEYS = {
   STATE: 'sabha-register-v1',
   SUPABASE_URL: 'sabha_supabase_url',
-  SUPABASE_KEY: 'sabha_supabase_key'
+  SUPABASE_KEY: 'sabha_supabase_key',
+  LOGS: 'sabha_activity_logs_v1',
+  USERS: 'sabha_app_users_v1'
 };
 
 // Application State
@@ -15,6 +20,9 @@ let S = {
   sabhas: [],
   att: {}
 };
+
+let appUsers = [];
+let activityLogs = [];
 
 let tab = 'sabha';
 let page = 'cur';
@@ -41,6 +49,24 @@ const fmt = d => {
     return d;
   }
 };
+const timeAgo = dateString => {
+  try {
+    const d = new Date(dateString);
+    const now = new Date();
+    const diffSec = Math.max(0, Math.floor((now - d) / 1000));
+    if (diffSec < 60) return 'Just now';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHour = Math.floor(diffMin / 60);
+    if (diffHour < 24) return `${diffHour}h ago`;
+    const diffDay = Math.floor(diffHour / 24);
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch (e) {
+    return dateString;
+  }
+};
+
 const kids = () => [...S.children].sort((a, b) => a.name.localeCompare(b.name));
 const bySabha = () => [...S.sabhas].sort((a, b) => a.date.localeCompare(b.date));
 const empty = (t, m) => `<div class="card empty"><h3>${esc(t)}</h3><p class="meta">${esc(m)}</p></div>`;
@@ -60,7 +86,36 @@ function toast(msg, type = 'info') {
 }
 
 // ------------------------------------------------------------------------------
-// 1. Supabase & Auth Initialization
+// 1. Permissions & Role Checking
+// ------------------------------------------------------------------------------
+
+function isUserAdmin() {
+  if (!currentUser || !currentUser.email) return false;
+  const email = currentUser.email.toLowerCase().trim();
+  if (email === MASTER_ADMIN_EMAIL.toLowerCase()) return true;
+
+  const user = appUsers.find(u => u.email && u.email.toLowerCase() === email);
+  return !!(user && user.role === 'admin' && user.status === 'approved');
+}
+
+function getUserStatus() {
+  if (!currentUser || !currentUser.email) return 'unauthenticated';
+  const email = currentUser.email.toLowerCase().trim();
+  if (email === MASTER_ADMIN_EMAIL.toLowerCase()) return 'admin';
+
+  const user = appUsers.find(u => u.email && u.email.toLowerCase() === email);
+  if (!user) return 'pending';
+  if (user.role === 'admin' && user.status === 'approved') return 'admin';
+  if (user.status === 'pending') return 'pending';
+  return 'viewer';
+}
+
+function getPendingRequests() {
+  return appUsers.filter(u => u.status === 'pending' && u.email.toLowerCase() !== MASTER_ADMIN_EMAIL.toLowerCase());
+}
+
+// ------------------------------------------------------------------------------
+// 2. Supabase & Auth Initialization
 // ------------------------------------------------------------------------------
 
 function getSupabaseCredentials() {
@@ -77,7 +132,7 @@ async function initSupabase() {
   const { url, key } = getSupabaseCredentials();
 
   if (!url || !key) {
-    console.log('[Samarpit] No Supabase credentials configured. Running in local/demo mode.');
+    console.log('[Samarpit] No Supabase credentials configured.');
     updateSyncBadge('offline');
     return false;
   }
@@ -99,14 +154,17 @@ async function initSupabase() {
     // Subscribe to auth state changes
     supabaseClient.auth.onAuthStateChange(async (event, session) => {
       console.log('[Samarpit] Auth state change:', event, session?.user?.email);
+      const prevUser = currentUser;
       currentUser = session ? session.user : null;
-      updateAuthUI();
-      if (currentUser) {
+
+      if (currentUser && (!prevUser || prevUser.id !== currentUser.id)) {
         toast(`Signed in as ${currentUser.email}`, 'ok');
+        await registerOrCheckUser();
         await syncFromCloud();
-      } else {
-        render();
       }
+
+      updateAuthUI();
+      render();
     });
 
     updateSyncBadge('cloud');
@@ -129,7 +187,7 @@ function updateSyncBadge(mode) {
   } else {
     el.className = 'chip-status offline';
     el.innerHTML = '○ Local / Demo Mode';
-    el.title = 'Saved locally in this browser. Tap Settings to connect Supabase.';
+    el.title = 'Saved locally in this browser.';
   }
 }
 
@@ -140,30 +198,36 @@ function updateAuthUI() {
   if (currentUser) {
     const avatar = currentUser.user_metadata?.avatar_url || currentUser.user_metadata?.picture;
     const name = currentUser.user_metadata?.full_name || currentUser.email.split('@')[0];
+    const isAdmin = isUserAdmin();
+    const pendingCount = getPendingRequests().length;
+
     authContainer.innerHTML = `
       <div class="user-badge" title="${esc(currentUser.email)}">
         ${avatar ? `<img src="${esc(avatar)}" alt="${esc(name)}" class="user-avatar" referrerpolicy="no-referrer">` : ''}
         <span>${esc(name)}</span>
+        <span class="badge-role ${isAdmin ? 'admin' : 'viewer'}">${isAdmin ? 'Admin' : 'Viewer'}</span>
       </div>
+      ${isAdmin ? `
+        <button class="btn ghost sm" id="btn-admin-panel" title="Admin & Allowance Requests" style="${pendingCount > 0 ? 'border-color:var(--accent);background:var(--soft);' : ''}">
+          🛡️ Admin ${pendingCount > 0 ? `<span class="chip" style="padding:1px 6px;font-size:11px;margin-left:2px;">${pendingCount}</span>` : ''}
+        </button>
+      ` : ''}
       <button class="btn ghost sm" id="btn-sign-out" title="Sign Out">Logout</button>
     `;
+
     const btnOut = $('#btn-sign-out');
     if (btnOut) btnOut.onclick = handleSignOut;
+
+    const btnAdmin = $('#btn-admin-panel');
+    if (btnAdmin) btnAdmin.onclick = openAdminModal;
   } else {
-    authContainer.innerHTML = `
-      <button class="btn btn-google sm" id="btn-sign-in">
-        <svg width="15" height="15" viewBox="0 0 24 24"><path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.65v3h3.86c2.26-2.09 3.685-5.17 3.685-9.09z"/><path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.37 24 12 24z"/><path fill="#FBBC05" d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09z"/><path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"/></svg>
-        Sign in
-      </button>
-    `;
-    const btnIn = $('#btn-sign-in');
-    if (btnIn) btnIn.onclick = handleSignIn;
+    authContainer.innerHTML = '';
   }
 }
 
 async function handleSignIn() {
   if (!supabaseClient) {
-    openSettingsDialog('Please configure your Supabase URL and Anon Key first.');
+    toast('Database configuration is missing.', 'error');
     return;
   }
   toast('Redirecting to Google Sign-In...', 'info');
@@ -196,7 +260,186 @@ async function handleSignOut() {
 }
 
 // ------------------------------------------------------------------------------
-// 2. Real-time Synchronization
+// 3. Allowance Request & User Management
+// ------------------------------------------------------------------------------
+
+async function registerOrCheckUser() {
+  if (!currentUser || !currentUser.email) return;
+  const email = currentUser.email.toLowerCase().trim();
+  const name = currentUser.user_metadata?.full_name || currentUser.email.split('@')[0];
+  const avatar = currentUser.user_metadata?.avatar_url || currentUser.user_metadata?.picture || null;
+  const isMaster = email === MASTER_ADMIN_EMAIL.toLowerCase();
+
+  // Master Admin is always ensured locally
+  if (isMaster) {
+    const existing = appUsers.find(u => u.email.toLowerCase() === email);
+    if (existing) {
+      existing.role = 'admin';
+      existing.status = 'approved';
+    } else {
+      appUsers.push({ email, name, avatar, role: 'admin', status: 'approved' });
+    }
+  }
+
+  if (!supabaseClient) return;
+
+  try {
+    const { data: existingUser, error: fetchErr } = await supabaseClient
+      .from('app_users')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (!existingUser) {
+      // First time login! Register user with pending allowance request
+      const initialRole = isMaster ? 'admin' : 'viewer';
+      const initialStatus = isMaster ? 'approved' : 'pending';
+
+      const { data: inserted, error: insertErr } = await supabaseClient
+        .from('app_users')
+        .insert([{
+          email,
+          name,
+          avatar,
+          role: initialRole,
+          status: initialStatus
+        }])
+        .select()
+        .single();
+
+      if (!insertErr && inserted) {
+        appUsers.push(inserted);
+        if (!isMaster) {
+          await logActivity('Sent request for Admin allowance', `New user ${name} (${email}) logged in and requested admin access.`);
+        }
+      }
+    } else {
+      // Ensure master admin stays admin
+      if (isMaster && (existingUser.role !== 'admin' || existingUser.status !== 'approved')) {
+        await supabaseClient.from('app_users').update({ role: 'admin', status: 'approved' }).eq('email', email);
+        existingUser.role = 'admin';
+        existingUser.status = 'approved';
+      }
+    }
+  } catch (err) {
+    console.warn('[Samarpit] App user check warning:', err.message);
+  }
+}
+
+async function approveUserAsAdmin(targetEmail) {
+  if (!isUserAdmin()) {
+    toast('Only admins can approve requests.', 'error');
+    return;
+  }
+
+  const emailNorm = targetEmail.toLowerCase().trim();
+  let user = appUsers.find(u => u.email && u.email.toLowerCase() === emailNorm);
+
+  if (user) {
+    user.role = 'admin';
+    user.status = 'approved';
+  } else {
+    user = { email: emailNorm, role: 'admin', status: 'approved' };
+    appUsers.push(user);
+  }
+
+  if (supabaseClient) {
+    try {
+      const { error } = await supabaseClient
+        .from('app_users')
+        .upsert({
+          email: emailNorm,
+          role: 'admin',
+          status: 'approved'
+        }, { onConflict: 'email' });
+
+      if (error) throw error;
+    } catch (err) {
+      console.error('[Samarpit] Approve error:', err);
+      toast(err.message || 'Error updating user role', 'error');
+      return;
+    }
+  }
+
+  await logActivity(`Approved ${emailNorm} as Admin`, 'User was granted full administrator permissions.');
+  saveToLocalCache();
+  updateAuthUI();
+  toast(`Approved ${emailNorm} as Admin!`, 'ok');
+  openAdminModal();
+}
+
+async function revokeAdminAccess(targetEmail) {
+  if (!isUserAdmin()) {
+    toast('Permission denied.', 'error');
+    return;
+  }
+
+  const emailNorm = targetEmail.toLowerCase().trim();
+  if (emailNorm === MASTER_ADMIN_EMAIL.toLowerCase()) {
+    toast('Cannot modify Master Admin.', 'error');
+    return;
+  }
+
+  const user = appUsers.find(u => u.email && u.email.toLowerCase() === emailNorm);
+  if (user) {
+    user.role = 'viewer';
+    user.status = 'approved';
+  }
+
+  if (supabaseClient) {
+    await supabaseClient.from('app_users').update({ role: 'viewer', status: 'approved' }).eq('email', emailNorm);
+  }
+
+  await logActivity(`Changed ${emailNorm} to Viewer`, 'Admin access revoked.');
+  saveToLocalCache();
+  updateAuthUI();
+  toast(`Set ${emailNorm} to Viewer`, 'ok');
+  openAdminModal();
+}
+
+// ------------------------------------------------------------------------------
+// 4. Activity Audit Logging
+// ------------------------------------------------------------------------------
+
+async function logActivity(action, details = '') {
+  const email = currentUser?.email || 'System';
+  const name = currentUser?.user_metadata?.full_name || email.split('@')[0];
+  const avatar = currentUser?.user_metadata?.avatar_url || currentUser?.user_metadata?.picture || null;
+
+  const entry = {
+    id: uid(),
+    action,
+    user_email: email,
+    user_name: name,
+    user_avatar: avatar,
+    details: details || '',
+    created_at: new Date().toISOString()
+  };
+
+  activityLogs.unshift(entry);
+  if (activityLogs.length > 200) activityLogs.pop();
+
+  if (supabaseClient && currentUser) {
+    try {
+      const { error } = await supabaseClient.from('activity_logs').insert([{
+        action,
+        user_email: email,
+        user_name: name,
+        user_avatar: avatar,
+        details: details || ''
+      }]);
+      if (error) console.warn('[Samarpit] Log insert warning:', error.message);
+    } catch (e) {
+      console.warn('[Samarpit] Activity log error:', e);
+    }
+  }
+
+  saveToLocalCache();
+  if (tab === 'logs') render();
+}
+
+// ------------------------------------------------------------------------------
+// 5. Real-time Synchronization
 // ------------------------------------------------------------------------------
 
 function setupRealtime() {
@@ -207,13 +450,15 @@ function setupRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'children' }, () => syncFromCloud())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'sabhas' }, () => syncFromCloud())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => syncFromCloud())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_users' }, () => syncUsersAndLogs())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'activity_logs' }, () => syncUsersAndLogs())
     .subscribe(status => {
       console.log('[Samarpit] Realtime subscription status:', status);
     });
 }
 
 // ------------------------------------------------------------------------------
-// 3. Cloud Database Sync (Fetch & Cache)
+// 6. Cloud Database Sync (Fetch & Cache)
 // ------------------------------------------------------------------------------
 
 async function syncFromCloud() {
@@ -264,7 +509,6 @@ async function syncFromCloud() {
       recap: s.recap || ''
     }));
 
-    // Map attendance into { [sabhaId]: { [childId]: 1 | 0 } }
     const attMap = {};
     (aData || []).forEach(row => {
       if (!attMap[row.sabha_id]) attMap[row.sabha_id] = {};
@@ -272,35 +516,85 @@ async function syncFromCloud() {
     });
     S.att = attMap;
 
+    await syncUsersAndLogs();
+
     saveToLocalCache();
     render();
   } catch (err) {
-    console.warn('[Samarpit] Cloud sync issue:', err.message);
+    console.warn('[Samarpit] Cloud sync warning:', err.message);
   } finally {
     isSyncing = false;
+  }
+}
+
+async function syncUsersAndLogs() {
+  if (!supabaseClient) return;
+
+  try {
+    // Fetch users
+    const { data: uData } = await supabaseClient
+      .from('app_users')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (uData) {
+      appUsers = uData;
+    }
+
+    // Always ensure master admin in appUsers list
+    if (!appUsers.some(u => u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase())) {
+      appUsers.push({ email: MASTER_ADMIN_EMAIL, name: 'Master Admin', role: 'admin', status: 'approved' });
+    }
+
+    // Fetch activity logs
+    const { data: lData } = await supabaseClient
+      .from('activity_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+
+    if (lData) {
+      activityLogs = lData;
+    }
+
+    updateAuthUI();
+    if (tab === 'logs') render();
+  } catch (e) {
+    console.warn('[Samarpit] Users and logs sync warning:', e);
   }
 }
 
 function saveToLocalCache() {
   try {
     localStorage.setItem(STORAGE_KEYS.STATE, JSON.stringify(S));
-  } catch (e) {
-    console.error('Error saving local cache', e);
-  }
+    localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(activityLogs));
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(appUsers));
+  } catch (e) {}
 }
 
 function loadLocalCache() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.STATE);
-    if (raw) S = Object.assign(S, JSON.parse(raw));
+    const rawState = localStorage.getItem(STORAGE_KEYS.STATE);
+    if (rawState) S = Object.assign(S, JSON.parse(rawState));
+
+    const rawLogs = localStorage.getItem(STORAGE_KEYS.LOGS);
+    if (rawLogs) activityLogs = JSON.parse(rawLogs);
+
+    const rawUsers = localStorage.getItem(STORAGE_KEYS.USERS);
+    if (rawUsers) appUsers = JSON.parse(rawUsers);
   } catch (e) {}
 }
 
 // ------------------------------------------------------------------------------
-// 4. CRUD Operations (Database + Local fallback)
+// 7. CRUD Operations (Enforced: Admins Only Can Modify)
 // ------------------------------------------------------------------------------
 
 async function dbSaveChild(childData, id) {
+  if (!isUserAdmin()) {
+    toast('Permission denied: Admin access required to add or edit bhulku.', 'error');
+    return;
+  }
+
   if (supabaseClient && currentUser) {
     const payload = {
       name: childData.name,
@@ -322,13 +616,14 @@ async function dbSaveChild(childData, id) {
     }
   }
 
-  // Update local memory
   if (id) {
     const existing = S.children.find(x => x.id === id);
     if (existing) Object.assign(existing, childData);
     else S.children.push({ id, ...childData });
+    await logActivity(`Updated bhulku record: '${childData.name}'`, `Class: ${childData.cls || 'N/A'}`);
   } else {
     S.children.push({ id: uid(), ...childData });
+    await logActivity(`Added new bhulku: '${childData.name}'`, `Class: ${childData.cls || 'N/A'}`);
   }
 
   saveToLocalCache();
@@ -337,6 +632,14 @@ async function dbSaveChild(childData, id) {
 }
 
 async function dbDeleteChild(id) {
+  if (!isUserAdmin()) {
+    toast('Permission denied: Admin access required.', 'error');
+    return;
+  }
+
+  const child = S.children.find(x => x.id === id);
+  const childName = child ? child.name : 'bhulku';
+
   if (supabaseClient && currentUser && !id.startsWith('local_')) {
     const { error } = await supabaseClient.from('children').delete().eq('id', id);
     if (error) throw error;
@@ -345,12 +648,18 @@ async function dbDeleteChild(id) {
   S.children = S.children.filter(x => x.id !== id);
   for (const s in S.att) delete S.att[s][id];
 
+  await logActivity(`Deleted bhulku: '${childName}'`);
   saveToLocalCache();
   render();
   toast('Bhulku removed', 'ok');
 }
 
 async function dbSaveSabha(sabhaData, id) {
+  if (!isUserAdmin()) {
+    toast('Permission denied: Admin access required to create or edit sabha.', 'error');
+    return;
+  }
+
   if (supabaseClient && currentUser) {
     const payload = {
       date: sabhaData.date,
@@ -373,8 +682,10 @@ async function dbSaveSabha(sabhaData, id) {
     const existing = S.sabhas.find(x => x.id === id);
     if (existing) Object.assign(existing, sabhaData);
     else S.sabhas.push({ id, ...sabhaData });
+    await logActivity(`Updated sabha: '${sabhaData.topic}'`, `Date: ${sabhaData.date}`);
   } else {
     S.sabhas.push({ id: uid(), ...sabhaData });
+    await logActivity(`Created new sabha: '${sabhaData.topic}'`, `Date: ${sabhaData.date}, Vakta: ${sabhaData.host || 'Not assigned'}`);
   }
 
   saveToLocalCache();
@@ -383,6 +694,14 @@ async function dbSaveSabha(sabhaData, id) {
 }
 
 async function dbDeleteSabha(id) {
+  if (!isUserAdmin()) {
+    toast('Permission denied: Admin access required.', 'error');
+    return;
+  }
+
+  const s = S.sabhas.find(x => x.id === id);
+  const topic = s ? s.topic : 'sabha';
+
   if (supabaseClient && currentUser && !id.startsWith('local_')) {
     const { error } = await supabaseClient.from('sabhas').delete().eq('id', id);
     if (error) throw error;
@@ -391,15 +710,23 @@ async function dbDeleteSabha(id) {
   S.sabhas = S.sabhas.filter(x => x.id !== id);
   delete S.att[id];
 
+  await logActivity(`Deleted sabha: '${topic}'`);
   saveToLocalCache();
   render();
   toast('Sabha deleted', 'ok');
 }
 
 async function dbSetAttendance(sabhaId, childId, status) {
-  const currentAtt = S.att[sabhaId] = S.att[sabhaId] || {};
+  if (!isUserAdmin()) {
+    toast('View-only access: Only admins can mark attendance.', 'error');
+    return;
+  }
 
-  // If status is null, delete attendance record
+  const currentAtt = S.att[sabhaId] = S.att[sabhaId] || {};
+  const child = S.children.find(x => x.id === childId);
+  const sabha = S.sabhas.find(x => x.id === sabhaId);
+  const childName = child ? child.name : 'bhulku';
+
   if (status === null) {
     delete currentAtt[childId];
     if (supabaseClient && currentUser && !sabhaId.startsWith('local_') && !childId.startsWith('local_')) {
@@ -421,13 +748,22 @@ async function dbSetAttendance(sabhaId, childId, status) {
     }
   }
 
+  const statusLabel = status === 1 ? 'Present' : status === 0 ? 'Absent' : 'Unmarked';
+  await logActivity(`Marked attendance: ${childName} as ${statusLabel}`, `Sabha: ${sabha ? sabha.topic : 'Date ' + sabhaId}`);
+
   saveToLocalCache();
   render();
 }
 
 async function dbMarkAllPresent(sabhaId) {
+  if (!isUserAdmin()) {
+    toast('View-only access: Only admins can mark attendance.', 'error');
+    return;
+  }
+
   const a = S.att[sabhaId] = S.att[sabhaId] || {};
   const upsertRows = [];
+  const sabha = S.sabhas.find(x => x.id === sabhaId);
 
   S.children.forEach(k => {
     a[k.id] = 1;
@@ -440,6 +776,8 @@ async function dbMarkAllPresent(sabhaId) {
     }
   });
 
+  await logActivity(`Marked all ${S.children.length} bhulkus present`, `Sabha: ${sabha ? sabha.topic : 'Date ' + sabhaId}`);
+
   saveToLocalCache();
   render();
   toast('Marked all present', 'ok');
@@ -451,14 +789,36 @@ async function dbMarkAllPresent(sabhaId) {
 }
 
 // ------------------------------------------------------------------------------
-// 5. Views & UI Rendering
+// 8. Views & UI Rendering
 // ------------------------------------------------------------------------------
+
+function renderRoleBanner() {
+  const isAdmin = isUserAdmin();
+  const status = getUserStatus();
+
+  if (isAdmin) return '';
+
+  if (status === 'pending') {
+    return `
+    <div class="readonly-banner" style="background:#fef7e0;border-color:#eab308;color:#854d0e;">
+      <span>⏳</span>
+      <span><strong>Admin Allowance Request Pending:</strong> Your request to become an admin has been sent. Until an admin approves you, you can view all records in read-only mode.</span>
+    </div>`;
+  }
+
+  return `
+  <div class="readonly-banner">
+    <span>👁️</span>
+    <span><strong>View-Only Mode:</strong> You have viewer access. You can explore sabhas, bhulku directory and attendance records, but cannot edit or change data.</span>
+  </div>`;
+}
 
 function sCard(s, label, cls, needRecap) {
   const n = S.children.length;
   const a = S.att[s.id] || {};
   const marked = Object.keys(a).length;
   const p = Object.values(a).filter(v => v === 1).length;
+  const isAdmin = isUserAdmin();
 
   return `<article class="card ${cls || ''}">
     <div class="row">
@@ -467,12 +827,12 @@ function sCard(s, label, cls, needRecap) {
     </div>
     <div class="topic">${esc(s.topic)}</div>
     <div class="meta">Vakta: <strong>${esc(s.host) || 'Not assigned'}</strong></div>
-    ${s.recap ? `<p class="recap">${esc(s.recap)}</p>` : (needRecap ? '<p class="meta">No recap yet. Tap Edit to add one.</p>' : '')}
+    ${s.recap ? `<p class="recap">${esc(s.recap)}</p>` : (needRecap ? '<p class="meta">No recap yet.' + (isAdmin ? ' Tap Edit to add one.' : '') + '</p>' : '')}
     <div class="row" style="margin-top:10px">
       <span class="meta">${marked ? `<strong>${p}</strong> of ${n} present` : 'Attendance not marked'}</span>
       <span>
         <button class="btn ghost sm" data-act="att" data-id="${s.id}">Attendance</button>
-        <button class="btn ghost sm" data-act="editS" data-id="${s.id}">Edit</button>
+        ${isAdmin ? `<button class="btn ghost sm" data-act="editS" data-id="${s.id}">Edit</button>` : ''}
       </span>
     </div>
   </article>`;
@@ -484,16 +844,17 @@ function sabhaView() {
   const past = all.filter(s => s.date < t).reverse();
   const now = all.filter(s => s.date >= t);
   const cur = now.shift();
+  const isAdmin = isUserAdmin();
   const pages = [
     ['past', 'Past', past.length],
     ['up', 'Upcoming', now.length],
     ['cur', 'Current', cur ? 1 : 0]
   ];
 
-  let h = `
-  <div class="row" style="margin-top:16px">
+  let h = renderRoleBanner() + `
+  <div class="row" style="margin-top:14px">
     <h2 style="margin:0">Sabha Schedule</h2>
-    <button class="btn" data-act="addS">+ Add Sabha</button>
+    ${isAdmin ? '<button class="btn" data-act="addS">+ Add Sabha</button>' : ''}
   </div>
   <div class="pages" role="group" aria-label="Sabha pages">
     ${pages.map(p => `<button data-act="page" data-id="${p[0]}" aria-pressed="${page === p[0]}">${p[1]} (${p[2]})</button>`).join('')}
@@ -512,7 +873,9 @@ function sabhaView() {
 function attView() {
   const t = today();
   const all = bySabha().reverse();
-  let h = '<h2 style="margin-top:16px">Attendance</h2>';
+  const isAdmin = isUserAdmin();
+
+  let h = renderRoleBanner() + '<h2 style="margin-top:14px">Attendance</h2>';
 
   if (!all.length || !S.children.length) {
     return h + empty('Nothing to mark yet', 'Add at least one bhulku and one sabha to mark attendance.');
@@ -532,7 +895,7 @@ function attView() {
   <select id="sel">${all.map(s => `<option value="${s.id}"${s.id === attId ? ' selected' : ''}>${fmt(s.date)}: ${esc(s.topic)}</option>`).join('')}</select>
   <div class="row" style="margin:14px 0">
     <span class="meta"><strong>${P}</strong> present, <strong>${A}</strong> absent, <strong>${c.length - P - A}</strong> not marked</span>
-    <button class="btn ghost sm" data-act="allP">Mark All Present</button>
+    ${isAdmin ? '<button class="btn ghost sm" data-act="allP">Mark All Present</button>' : ''}
   </div>`;
 
   return h + c.map(k => `
@@ -541,18 +904,20 @@ function attView() {
       <strong>${esc(k.name)}</strong>
       ${k.cls ? `<br><span class="meta">${esc(k.cls)}</span>` : ''}
     </span>
-    <div class="seg" role="group" aria-label="Attendance for ${esc(k.name)}">
-      <button data-act="mark" data-id="${k.id}" data-v="1" aria-pressed="${a[k.id] === 1}" class="${a[k.id] === 1 ? 'on-p' : ''}">Present</button>
-      <button data-act="mark" data-id="${k.id}" data-v="0" aria-pressed="${a[k.id] === 0}" class="${a[k.id] === 0 ? 'on-a' : ''}">Absent</button>
+    <div class="seg" role="group" aria-label="Attendance for ${esc(k.name)}" style="${isAdmin ? '' : 'pointer-events:none;'}">
+      <button ${isAdmin ? `data-act="mark" data-id="${k.id}" data-v="1"` : 'type="button"'} aria-pressed="${a[k.id] === 1}" class="${a[k.id] === 1 ? 'on-p' : ''}">Present</button>
+      <button ${isAdmin ? `data-act="mark" data-id="${k.id}" data-v="0"` : 'type="button"'} aria-pressed="${a[k.id] === 0}" class="${a[k.id] === 0 ? 'on-a' : ''}">Absent</button>
     </div>
   </div>`).join('');
 }
 
 function kidsView() {
-  let h = `
-  <div class="row" style="margin-top:16px">
+  const isAdmin = isUserAdmin();
+
+  let h = renderRoleBanner() + `
+  <div class="row" style="margin-top:14px">
     <h2 style="margin:0">Bhulku Directory</h2>
-    <button class="btn" data-act="addC">+ Add Bhulku</button>
+    ${isAdmin ? '<button class="btn" data-act="addC">+ Add Bhulku</button>' : ''}
   </div>`;
 
   if (!S.children.length) {
@@ -568,6 +933,7 @@ function kidsView() {
 function kidList() {
   const searchTerm = q.toLowerCase().trim();
   const L = kids().filter(k => (k.name + ' ' + (k.cls || '') + ' ' + (k.phone || '')).toLowerCase().includes(searchTerm));
+  const isAdmin = isUserAdmin();
 
   if (!L.length) {
     return '<p class="meta" style="text-align:center;padding:20px;">No bhulku matches that search.</p>';
@@ -590,7 +956,7 @@ function kidList() {
     <article class="card">
       <div class="row">
         <h3>${esc(k.name)}</h3>
-        <button class="btn ghost sm" data-act="editC" data-id="${k.id}">Edit</button>
+        ${isAdmin ? `<button class="btn ghost sm" data-act="editC" data-id="${k.id}">Edit</button>` : ''}
       </div>
       <dl>
         ${r('Class', esc(k.cls))}
@@ -604,6 +970,42 @@ function kidList() {
         ${m ? `Present at <strong>${pr}</strong> of <strong>${m}</strong> sabhas (${pct}%)` : 'Attendance not marked yet'}
       </div>
     </article>`;
+  }).join('');
+}
+
+function logsView() {
+  let h = `
+  <div class="row" style="margin-top:14px">
+    <div>
+      <h2 style="margin:0">Activity Audit Logs</h2>
+      <p class="sub" style="margin:2px 0 0;">Record of actions performed across the mandal</p>
+    </div>
+    <button class="btn ghost sm" id="btn-refresh-logs">Refresh</button>
+  </div>
+  <div style="margin-top:16px;"></div>`;
+
+  if (!activityLogs.length) {
+    return h + empty('No activity logs recorded yet', 'Actions such as creating sabhas, adding bhulkus, and marking attendance will be logged here.');
+  }
+
+  return h + activityLogs.map(log => {
+    const avatar = log.user_avatar;
+    const name = log.user_name || log.user_email?.split('@')[0] || 'Unknown';
+    const initial = (name[0] || 'U').toUpperCase();
+
+    return `
+    <div class="log-card">
+      ${avatar ? `<img src="${esc(avatar)}" class="log-avatar" alt="${esc(name)}" referrerpolicy="no-referrer">` : `<div class="log-avatar-placeholder">${initial}</div>`}
+      <div class="log-body">
+        <div class="log-action-text">${esc(log.action)}</div>
+        ${log.details ? `<div class="meta" style="font-size:13px;margin-bottom:4px;">${esc(log.details)}</div>` : ''}
+        <div class="log-meta-line">
+          <span><strong>${esc(name)}</strong> (${esc(log.user_email)})</span>
+          <span>•</span>
+          <span>${timeAgo(log.created_at)}</span>
+        </div>
+      </div>
+    </div>`;
   }).join('');
 }
 
@@ -653,12 +1055,14 @@ function render() {
 
   const mainView = $('#view');
   if (mainView) {
-    mainView.innerHTML = tab === 'sabha' ? sabhaView() : tab === 'att' ? attView() : kidsView();
+    mainView.innerHTML = tab === 'sabha' ? sabhaView() : tab === 'att' ? attView() : tab === 'kids' ? kidsView() : logsView();
+    const btnRefreshLogs = $('#btn-refresh-logs');
+    if (btnRefreshLogs) btnRefreshLogs.onclick = () => syncUsersAndLogs();
   }
 }
 
 // ------------------------------------------------------------------------------
-// 6. Dialogs & Forms
+// 9. Dialogs & Admin Management Modal
 // ------------------------------------------------------------------------------
 
 const field = (id, label, v, type, extra) => `
@@ -716,6 +1120,10 @@ function openForm(title, body, onSave, onDel) {
 }
 
 function childForm(id) {
+  if (!isUserAdmin()) {
+    toast('Admin access required.', 'error');
+    return;
+  }
   const k = S.children.find(x => x.id === id) || {};
   openForm(
     id ? 'Edit Bhulku' : 'Add New Bhulku',
@@ -732,6 +1140,10 @@ function childForm(id) {
 }
 
 function sabhaForm(id) {
+  if (!isUserAdmin()) {
+    toast('Admin access required.', 'error');
+    return;
+  }
   const s = S.sabhas.find(x => x.id === id) || { date: today() };
   openForm(
     id ? 'Edit Sabha' : 'Add New Sabha',
@@ -747,74 +1159,107 @@ function sabhaForm(id) {
   );
 }
 
-// ------------------------------------------------------------------------------
-// 7. Settings Dialog (Supabase Credentials & OAuth Setup)
-// ------------------------------------------------------------------------------
+function openAdminModal() {
+  if (!isUserAdmin()) {
+    toast('Admin access required.', 'error');
+    return;
+  }
 
-function openSettingsDialog(notice) {
-  const { url, key } = getSupabaseCredentials();
+  const pendingList = getPendingRequests();
+  const currentAdmins = appUsers.filter(u => u.role === 'admin' || u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase());
 
   dlg.innerHTML = `
-    <div style="padding: 4px 0;">
-      <h2 style="margin-top:0">Database & Cloud Setup</h2>
-      ${notice ? `<div class="banner"><p style="margin:0;font-size:14px;">${esc(notice)}</p></div>` : ''}
-      <p class="meta" style="margin-bottom:16px;">
-        Connect your <strong>100% Free Supabase PostgreSQL</strong> database and Google OAuth to sync across all devices.
+    <div style="padding: 2px 0;">
+      <div class="row">
+        <h2 style="margin:0">🛡️ Administrator Management</h2>
+        <button class="btn ghost sm" id="admin-modal-cx">✕</button>
+      </div>
+      <p class="meta" style="margin: 6px 0 16px;">
+        Manage allowance requests and administrators for Samarpit Iraniwadi.
       </p>
 
-      <form id="cfg-form">
-        <label for="cfg_url">Supabase Project URL</label>
-        <input id="cfg_url" name="url" type="url" placeholder="https://xyzcompany.supabase.co" value="${esc(url)}" required>
-
-        <label for="cfg_key">Supabase Anon Public Key</label>
-        <input id="cfg_key" name="key" type="password" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..." value="${esc(key)}" required>
-
-        <div class="row" style="margin-top:20px">
-          <button type="button" class="btn ghost sm" id="btn-view-sql">View SQL Schema</button>
-          <span>
-            <button type="button" class="btn ghost" id="cfg-cx">Close</button>
-            <button class="btn" type="submit">Save & Connect</button>
-          </span>
+      <h3 style="font-size:16px;margin: 16px 0 8px;">⏳ Pending Allowance Requests (${pendingList.length})</h3>
+      ${pendingList.length === 0 ? `
+        <div class="card" style="padding: 12px; text-align: center;">
+          <p class="meta" style="margin:0;">No pending allowance requests. When someone new logs in, their request will appear here.</p>
         </div>
-      </form>
+      ` : pendingList.map(u => `
+        <div class="pending-user-card">
+          <div style="display:flex;align-items:center;gap:10px;">
+            ${u.avatar ? `<img src="${esc(u.avatar)}" class="user-avatar" referrerpolicy="no-referrer">` : `<div class="user-avatar" style="display:flex;align-items:center;justify-content:center;font-weight:700;">${(u.name || u.email)[0].toUpperCase()}</div>`}
+            <div>
+              <strong>${esc(u.name || u.email.split('@')[0])}</strong><br>
+              <span class="meta" style="font-size:12.5px;">${esc(u.email)}</span>
+            </div>
+          </div>
+          <button class="btn btn-approve" data-act="approve-admin" data-email="${esc(u.email)}">Approve as Admin</button>
+        </div>
+      `).join('')}
 
-      <div style="border-top:1px solid var(--line);margin-top:20px;padding-top:14px;">
-        <span class="meta" style="font-size:13px;">
-          Need a Supabase database? Create one free at <a href="https://supabase.com" target="_blank" rel="noopener">supabase.com</a>. Run <code>schema.sql</code> in the SQL Editor.
-        </span>
+      <h3 style="font-size:16px;margin: 20px 0 8px;">👑 Current Administrators</h3>
+      <div class="card" style="padding: 8px 12px;">
+        ${currentAdmins.map(u => {
+          const isMaster = u.email.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase();
+          return `
+          <div class="row" style="padding: 8px 0; border-bottom: 1px solid var(--line);">
+            <div>
+              <strong>${esc(u.name || u.email.split('@')[0])}</strong> ${isMaster ? '<span class="chip" style="font-size:11px;padding:1px 6px;">Master Admin</span>' : ''}<br>
+              <span class="meta" style="font-size:12px;">${esc(u.email)}</span>
+            </div>
+            ${(!isMaster && u.email.toLowerCase() !== currentUser.email.toLowerCase()) ? `
+              <button class="btn ghost sm danger" data-act="revoke-admin" data-email="${esc(u.email)}">Demote</button>
+            ` : ''}
+          </div>`;
+        }).join('')}
       </div>
+
+      <h3 style="font-size:16px;margin: 20px 0 8px;">➕ Add Administrator by Email</h3>
+      <form id="form-direct-add-admin" class="row" style="gap:8px;">
+        <input id="direct_admin_email" type="email" placeholder="karyakar@gmail.com" required style="padding:8px 12px;">
+        <button class="btn sm" type="submit" style="white-space:nowrap;">Add Admin</button>
+      </form>
     </div>
   `;
+
   dlg.showModal();
 
-  $('#cfg-form').onsubmit = async e => {
-    e.preventDefault();
-    const newUrl = $('#cfg_url').value.trim();
-    const newKey = $('#cfg_key').value.trim();
+  $('#admin-modal-cx').onclick = () => dlg.close();
 
-    localStorage.setItem(STORAGE_KEYS.SUPABASE_URL, newUrl);
-    localStorage.setItem(STORAGE_KEYS.SUPABASE_KEY, newKey);
+  // Handle Approve button
+  dlg.querySelectorAll('[data-act="approve-admin"]').forEach(btn => {
+    btn.onclick = async () => {
+      const email = btn.dataset.email;
+      btn.disabled = true;
+      btn.innerText = 'Approving...';
+      await approveUserAsAdmin(email);
+    };
+  });
 
-    dlg.close();
-    toast('Connecting to Supabase...', 'info');
+  // Handle Revoke button
+  dlg.querySelectorAll('[data-act="revoke-admin"]').forEach(btn => {
+    btn.onclick = async () => {
+      const email = btn.dataset.email;
+      if (confirm(`Remove admin permissions from ${email}?`)) {
+        await revokeAdminAccess(email);
+      }
+    };
+  });
 
-    const ok = await initSupabase();
-    if (ok) {
-      toast('Supabase connected successfully!', 'ok');
-      await syncFromCloud();
-    } else {
-      toast('Could not connect. Check credentials.', 'error');
-    }
-  };
-
-  $('#cfg-cx').onclick = () => dlg.close();
-  $('#btn-view-sql').onclick = () => {
-    window.open('schema.sql', '_blank');
-  };
+  // Handle Direct Add form
+  const formDirect = $('#form-direct-add-admin');
+  if (formDirect) {
+    formDirect.onsubmit = async e => {
+      e.preventDefault();
+      const input = $('#direct_admin_email');
+      const email = input.value.trim().toLowerCase();
+      if (!email) return;
+      await approveUserAsAdmin(email);
+    };
+  }
 }
 
 // ------------------------------------------------------------------------------
-// 8. Event Listeners
+// 10. Event Listeners
 // ------------------------------------------------------------------------------
 
 document.addEventListener('click', async e => {
@@ -840,6 +1285,10 @@ document.addEventListener('click', async e => {
     await dbMarkAllPresent(attId);
   }
   else if (act === 'mark') {
+    if (!isUserAdmin()) {
+      toast('View-only access: Only admins can mark attendance.', 'error');
+      return;
+    }
     const a = S.att[attId] = S.att[attId] || {};
     const val = +v;
     if (a[id] === val) {
@@ -877,32 +1326,26 @@ document.addEventListener('change', e => {
   }
 });
 
-// Settings button
-const btnSettings = $('#btn-settings');
-if (btnSettings) {
-  btnSettings.onclick = () => openSettingsDialog();
-}
-
 // ------------------------------------------------------------------------------
-// 9. Startup Sequence
+// 11. Startup Sequence
 // ------------------------------------------------------------------------------
 
 (async function startup() {
-  // Hide navigation tabs initially until authentication is verified
   const tabsNav = document.querySelector('.tabs');
   const statusBadge = $('#status-badge');
   if (tabsNav) tabsNav.style.display = 'none';
   if (statusBadge) statusBadge.style.display = 'none';
 
+  loadLocalCache();
   render();
 
-  // Try connecting to Supabase and verify session
   await initSupabase();
+
   if (supabaseClient && currentUser) {
-    loadLocalCache();
+    await registerOrCheckUser();
     await syncFromCloud();
-  } else {
-    updateAuthUI();
-    render();
   }
+
+  updateAuthUI();
+  render();
 })();
