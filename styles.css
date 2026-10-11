@@ -215,6 +215,12 @@ h3 {
   color: var(--accent-text);
   border: 1px solid var(--accent);
 }
+.chip.ended {
+  background: var(--nobg);
+  color: var(--no);
+  border-color: rgba(220, 38, 38, 0.35);
+  font-weight: 700;
+}
 
 .chip-status {
   display: inline-flex;

@@ -27,9 +27,12 @@ CREATE TABLE IF NOT EXISTS public.sabhas (
     topic TEXT NOT NULL,
     host TEXT,
     recap TEXT,
+    ended BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
+
+ALTER TABLE public.sabhas ADD COLUMN IF NOT EXISTS ended BOOLEAN DEFAULT FALSE;
 
 -- 4. Create 'attendance' Table
 CREATE TABLE IF NOT EXISTS public.attendance (

@@ -76,6 +76,7 @@ const timeAgo = dateString => {
 
 const kids = () => [...S.children].sort((a, b) => a.name.localeCompare(b.name));
 const bySabha = () => [...S.sabhas].sort((a, b) => a.date.localeCompare(b.date));
+const isSabhaPast = s => Boolean(s && (s.ended || s.date < today()));
 const empty = (t, m) => `<div class="card empty"><h3>${esc(t)}</h3><p class="meta">${esc(m)}</p></div>`;
 
 // Toast Notification
@@ -576,7 +577,7 @@ function computeStateHash() {
       c: S.children.length,
       cid: S.children.map(x => x.id + x.name + (x.cls || '')).join('|'),
       s: S.sabhas.length,
-      sid: S.sabhas.map(x => x.id + x.date + x.topic).join('|'),
+      sid: S.sabhas.map(x => x.id + x.date + x.topic + (x.ended ? '1' : '0')).join('|'),
       a: S.att,
       u: appUsers.map(x => x.email + x.role + x.status).join('|'),
       l: activityLogs.length ? activityLogs[0].id : ''
@@ -718,13 +719,18 @@ async function syncFromCloud(forceRender = false) {
       food: k.food || ''
     }));
 
-    S.sabhas = (sData || []).map(s => ({
-      id: s.id,
-      date: s.date,
-      topic: s.topic,
-      host: s.host || '',
-      recap: s.recap || ''
-    }));
+    S.sabhas = (sData || []).map(s => {
+      const hasEndedTag = typeof s.recap === 'string' && (s.recap.startsWith('[ENDED]') || s.recap.includes('<!--ended-->') || s.recap.includes('[Status: Ended]'));
+      const cleanRecap = typeof s.recap === 'string' ? s.recap.replace(/^\[ENDED\]\s*/, '').replace(/\s*<!--ended-->\s*/, '').replace(/\s*\[Status: Ended\]\s*/, '').trim() : '';
+      return {
+        id: s.id,
+        date: s.date,
+        topic: s.topic,
+        host: s.host || '',
+        recap: cleanRecap,
+        ended: Boolean(s.ended || hasEndedTag)
+      };
+    });
 
     const attMap = {};
     (aData || []).forEach(row => {
@@ -948,6 +954,14 @@ async function dbSaveSabha(sabhaData, id) {
     return;
   }
 
+  if (id) {
+    const existing = S.sabhas.find(x => x.id === id);
+    if (existing && isSabhaPast(existing)) {
+      toast('Past sabhas cannot be edited. They can only be deleted.', 'error');
+      return;
+    }
+  }
+
   if (supabaseClient && currentUser) {
     const payload = {
       date: sabhaData.date,
@@ -980,6 +994,43 @@ async function dbSaveSabha(sabhaData, id) {
   render();
   toast(id ? 'Sabha updated' : 'Sabha added', 'ok');
   broadcastChange('sabha_saved');
+}
+
+async function dbEndSabha(id) {
+  if (!isUserAdmin()) {
+    toast('Permission denied: Admin access required to end a sabha.', 'error');
+    return;
+  }
+
+  const s = S.sabhas.find(x => x.id === id);
+  if (!s) return;
+
+  s.ended = true;
+
+  if (supabaseClient && currentUser && !id.startsWith('local_')) {
+    // Attempt 1: Update ended column in Supabase
+    let { error } = await supabaseClient.from('sabhas').update({
+      ended: true
+    }).eq('id', id);
+
+    // If 'ended' column does not exist yet (error 42703), fallback to [ENDED] tag in recap
+    if (error && (error.code === '42703' || error.message?.includes('ended'))) {
+      const taggedRecap = s.recap ? `[ENDED] ${s.recap}` : '[ENDED]';
+      const fallbackRes = await supabaseClient.from('sabhas').update({
+        recap: taggedRecap
+      }).eq('id', id);
+      if (fallbackRes.error) {
+        console.warn('[Samarpit] Cloud end sabha fallback error:', fallbackRes.error.message);
+      }
+    }
+  }
+
+  await logActivity(`Ended sabha: '${s.topic}'`, `Sabha marked as completed and moved to Past Sabhas.`);
+  saveToLocalCache();
+  page = 'past';
+  render();
+  toast('Sabha ended and moved to Past Sabhas', 'ok');
+  broadcastChange('sabha_ended');
 }
 
 async function dbDeleteSabha(id) {
@@ -1119,20 +1170,28 @@ function sCard(s, label, cls, needRecap) {
   const marked = Object.keys(a).length;
   const p = Object.values(a).filter(v => v === 1).length;
   const isAdmin = isUserAdmin();
+  const isPast = isSabhaPast(s);
 
   return `<article class="card ${cls || ''}">
     <div class="row">
       <span class="date">${fmt(s.date)}</span>
-      ${label ? `<span class="chip">${label}</span>` : ''}
+      ${s.ended ? `<span class="chip ended">Ended</span>` : label ? `<span class="chip">${label}</span>` : ''}
     </div>
     <div class="topic">${esc(s.topic)}</div>
     <div class="meta">Vakta: <strong>${esc(s.host) || 'Not assigned'}</strong></div>
-    ${s.recap ? `<p class="recap">${esc(s.recap)}</p>` : (needRecap ? '<p class="meta">No recap yet.' + (isAdmin ? ' Tap Edit to add one.' : '') + '</p>' : '')}
-    <div class="row" style="margin-top:10px">
+    ${s.recap ? `<p class="recap">${esc(s.recap)}</p>` : (needRecap ? '<p class="meta">No recap recorded.</p>' : '')}
+    <div class="row" style="margin-top:10px; gap:6px; flex-wrap:wrap;">
       <span class="meta">${marked ? `<strong>${p}</strong> of ${n} present` : 'Attendance not marked'}</span>
-      <span>
+      <span style="display:flex; gap:6px;">
         <button class="btn ghost sm" data-act="att" data-id="${s.id}">Attendance</button>
-        ${isAdmin ? `<button class="btn ghost sm" data-act="editS" data-id="${s.id}">Edit</button>` : ''}
+        ${isAdmin ? (
+          isPast
+            ? `<button class="btn ghost sm danger" data-act="delS" data-id="${s.id}" title="Delete past sabha">Delete</button>`
+            : `
+              <button class="btn ghost sm" data-act="editS" data-id="${s.id}">Edit</button>
+              <button class="btn ghost sm" data-act="endS" data-id="${s.id}" style="color:#d97706;border-color:#fde68a;" title="End this sabha and move to Past">End Sabha</button>
+            `
+        ) : ''}
       </span>
     </div>
   </article>`;
@@ -1141,13 +1200,14 @@ function sCard(s, label, cls, needRecap) {
 function sabhaView() {
   const t = today();
   const all = bySabha();
-  const past = all.filter(s => s.date < t).reverse();
-  const now = all.filter(s => s.date >= t);
-  const cur = now.shift();
+  const past = all.filter(s => isSabhaPast(s)).reverse();
+  const active = all.filter(s => !isSabhaPast(s));
+  const cur = active.shift();
+  const upcoming = active;
   const isAdmin = isUserAdmin();
   const pages = [
     ['past', 'Past', past.length],
-    ['up', 'Upcoming', now.length],
+    ['up', 'Upcoming', upcoming.length],
     ['cur', 'Current', cur ? 1 : 0]
   ];
 
@@ -1161,11 +1221,11 @@ function sabhaView() {
   </div>`;
 
   if (page === 'past') {
-    h += '<h2>Past Sabhas</h2>' + (past.length ? past.map(s => sCard(s, '', '', true)).join('') : empty('No past sabha', 'Sabhas dated before today appear here with their recap.'));
+    h += '<h2>Past Sabhas</h2>' + (past.length ? past.map(s => sCard(s, s.ended ? 'Ended' : '', '', true)).join('') : empty('No past sabha', 'Sabhas that have ended or are dated before today appear here.'));
   } else if (page === 'up') {
-    h += '<h2>Upcoming Sabhas</h2>' + (now.length ? now.map(s => sCard(s)).join('') : empty('Nothing upcoming', 'Add the next sabha with its date, topic and vakta.'));
+    h += '<h2>Upcoming Sabhas</h2>' + (upcoming.length ? upcoming.map(s => sCard(s)).join('') : empty('Nothing upcoming', 'Add the next sabha with its date, topic and vakta.'));
   } else {
-    h += '<h2>Current Sabha</h2>' + (cur ? sCard(cur, cur.date === t ? 'Today' : 'Next', 'cur') : empty('No current sabha', 'Add a sabha dated today or later.'));
+    h += '<h2>Current Sabha</h2>' + (cur ? sCard(cur, cur.date === t ? 'Today' : 'Next', 'cur') : empty('No current sabha', 'Add a sabha dated today or later, or check past sabhas.'));
   }
   return h;
 }
@@ -1192,7 +1252,7 @@ function attView() {
 
   h += `
   <label for="sel">Select Sabha</label>
-  <select id="sel">${all.map(s => `<option value="${s.id}"${s.id === attId ? ' selected' : ''}>${fmt(s.date)}: ${esc(s.topic)}</option>`).join('')}</select>
+  <select id="sel">${all.map(s => `<option value="${s.id}"${s.id === attId ? ' selected' : ''}>${fmt(s.date)}: ${esc(s.topic)}${s.ended ? ' (Ended)' : ''}</option>`).join('')}</select>
   <div class="row" style="margin:14px 0">
     <span class="meta"><strong>${P}</strong> present, <strong>${A}</strong> absent, <strong>${c.length - P - A}</strong> not marked</span>
     ${isAdmin ? '<button class="btn ghost sm" data-act="allP">Mark All Present</button>' : ''}
@@ -1447,6 +1507,13 @@ function sabhaForm(id) {
     toast('Admin access required.', 'error');
     return;
   }
+  if (id) {
+    const existing = S.sabhas.find(x => x.id === id);
+    if (existing && isSabhaPast(existing)) {
+      toast('Past sabhas cannot be edited. They can only be deleted.', 'error');
+      return;
+    }
+  }
   const s = S.sabhas.find(x => x.id === id) || { date: today() };
   openForm(
     id ? 'Edit Sabha' : 'Add New Sabha',
@@ -1653,6 +1720,8 @@ CREATE TRIGGER trg_purge_old_activity_logs
     FOR EACH STATEMENT
     EXECUTE FUNCTION public.trigger_purge_old_activity_logs();
 
+ALTER TABLE public.sabhas ADD COLUMN IF NOT EXISTS ended BOOLEAN DEFAULT FALSE;
+
 ALTER TABLE public.children REPLICA IDENTITY FULL;
 ALTER TABLE public.sabhas REPLICA IDENTITY FULL;
 ALTER TABLE public.attendance REPLICA IDENTITY FULL;
@@ -1809,6 +1878,28 @@ document.addEventListener('click', async e => {
 
   if (act === 'addS') sabhaForm();
   else if (act === 'editS') sabhaForm(id);
+  else if (act === 'endS') {
+    if (!isUserAdmin()) {
+      toast('Admin access required.', 'error');
+      return;
+    }
+    const s = S.sabhas.find(x => x.id === id);
+    if (!s) return;
+    if (confirm(`Are you sure you want to end sabha: '${s.topic}'?\n\nIt will be moved to Past Sabhas and cannot be edited afterwards (only deleted).`)) {
+      await dbEndSabha(id);
+    }
+  }
+  else if (act === 'delS') {
+    if (!isUserAdmin()) {
+      toast('Admin access required.', 'error');
+      return;
+    }
+    const s = S.sabhas.find(x => x.id === id);
+    if (!s) return;
+    if (confirm(`Are you sure you want to permanently delete past sabha: '${s.topic}'?\n\nAttendance records for this sabha will also be removed.`)) {
+      await dbDeleteSabha(id);
+    }
+  }
   else if (act === 'addC') childForm();
   else if (act === 'editC') childForm(id);
   else if (act === 'att') {
