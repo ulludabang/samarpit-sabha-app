@@ -28,7 +28,7 @@ let isSyncing = false;
 // DOM Utilities
 const $ = s => document.querySelector(s);
 const dlg = $('#dlg');
-const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>', '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => 'local_' + Math.random().toString(36).slice(2, 9);
 const today = () => {
   const d = new Date();
