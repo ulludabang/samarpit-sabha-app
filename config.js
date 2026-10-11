@@ -10,11 +10,11 @@
 // ==============================================================================
 
 window.APP_CONFIG = {
-  // Replace with your Supabase Project URL (e.g. "https://abcdefghijklm.supabase.co")
-  SUPABASE_URL: window.SUPABASE_URL || "",
+  // Your Supabase Project URL
+  SUPABASE_URL: "https://bsefanprsdzyndcjuhfo.supabase.co",
 
-  // Replace with your Supabase Anon Public Key (starts with "eyJhbGciOi...")
-  SUPABASE_ANON_KEY: window.SUPABASE_ANON_KEY || "",
+  // Supabase Anon Public Key
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJzZWZhbnByc2R6eW5kY2p1aGZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE2OTk1MzgsImV4cCI6MjEwNzI3NTUzOH0.8rPPNYsAdLCS0w7ooPBgsovEbuSaPbOOfXrswij_jZM",
 
   // OAuth Provider configuration
   AUTH_PROVIDER: "google",
