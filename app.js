@@ -211,7 +211,13 @@ function updateAuthUI() {
         <button class="btn ghost sm" id="btn-admin-panel" title="Admin & Allowance Requests" style="${pendingCount > 0 ? 'border-color:var(--accent);background:var(--soft);' : ''}">
           🛡️ Admin ${pendingCount > 0 ? `<span class="chip" style="padding:1px 6px;font-size:11px;margin-left:2px;">${pendingCount}</span>` : ''}
         </button>
-      ` : ''}
+      ` : (
+        getUserStatus() === 'pending' ? `
+          <button class="btn ghost sm" data-act="req-admin" title="Request pending approval" style="font-size:12px;padding:4px 9px;border-color:var(--accent);background:var(--soft);color:var(--accent-text);">⏳ Pending</button>
+        ` : `
+          <button class="btn ghost sm" data-act="req-admin" title="Request administrator permissions" style="font-size:12px;padding:4px 9px;">Request Admin</button>
+        `
+      )}
       <button class="btn ghost sm" id="btn-sign-out" title="Sign Out">Logout</button>
     `;
 
@@ -801,15 +807,23 @@ function renderRoleBanner() {
   if (status === 'pending') {
     return `
     <div class="readonly-banner" style="background:#fef7e0;border-color:#eab308;color:#854d0e;">
-      <span>⏳</span>
-      <span><strong>Admin Allowance Request Pending:</strong> Your request to become an admin has been sent. Until an admin approves you, you can view all records in read-only mode.</span>
+      <div style="display:flex;align-items:center;gap:8px;flex:1;">
+        <span style="font-size:18px;">⏳</span>
+        <span><strong>Admin Allowance Request Pending:</strong> Your request to become an admin has been sent to the admins and is awaiting approval.</span>
+      </div>
+      <button class="btn sm ghost" data-act="req-admin" style="white-space:nowrap;padding:4px 10px;font-size:12px;border-color:#eab308;color:#854d0e;background:rgba(255,255,255,0.4);">View Request</button>
     </div>`;
   }
 
   return `
   <div class="readonly-banner">
-    <span>👁️</span>
-    <span><strong>View-Only Mode:</strong> You have viewer access. You can explore sabhas, bhulku directory and attendance records, but cannot edit or change data.</span>
+    <div style="display:flex;align-items:center;gap:8px;flex:1;">
+      <span style="font-size:18px;">👁️</span>
+      <span><strong>View-Only Mode:</strong> You can explore all records. Need to add sabhas or mark attendance?</span>
+    </div>
+    <button class="btn sm" data-act="req-admin" style="white-space:nowrap;padding:6px 14px;font-size:13px;">
+      Request Admin Access
+    </button>
   </div>`;
 }
 
@@ -1159,6 +1173,94 @@ function sabhaForm(id) {
   );
 }
 
+function openRequestAdminDialog() {
+  const email = currentUser?.email || '';
+  const name = currentUser?.user_metadata?.full_name || email.split('@')[0];
+  const isPending = getUserStatus() === 'pending';
+
+  dlg.innerHTML = `
+    <form id="form-req-admin" style="padding: 2px 0;">
+      <div style="font-size: 38px; margin-bottom: 6px;">🛡️</div>
+      <h2 style="margin: 0 0 6px;">Request Administrator Access</h2>
+      <p class="meta" style="margin-bottom: 16px; font-size: 14px; line-height: 1.5;">
+        ${isPending ? 'You already have an active request awaiting admin approval. You can update your note below.' : 'Submit a request to become an Administrator for <strong>SAMARPIT IRANIWADI</strong>.'}
+      </p>
+
+      <div class="card" style="padding: 10px 14px; margin-bottom: 16px; background: var(--soft);">
+        <div style="font-size: 12px; color: var(--mute);">Your Account:</div>
+        <div style="font-weight: 600; font-size: 15px;">${esc(name)} (${esc(email)})</div>
+        <div style="font-size: 12px; margin-top: 4px; color: var(--accent-text);">Current status: <strong>${isPending ? 'Pending Approval' : 'Viewer (Read-Only)'}</strong></div>
+      </div>
+
+      <label for="req_note">Optional Note / Role in Mandal</label>
+      <input id="req_note" name="note" type="text" placeholder="e.g. Volunteer / Sabha Coordinator" autocomplete="off" style="margin-bottom: 6px;">
+
+      <div class="row" style="margin-top: 20px;">
+        <button type="button" class="btn ghost" id="req-cx">Cancel</button>
+        <button class="btn" type="submit">${isPending ? 'Update Request' : 'Send Request to Admins'}</button>
+      </div>
+    </form>
+  `;
+
+  dlg.showModal();
+
+  $('#req-cx').onclick = () => dlg.close();
+
+  $('#form-req-admin').onsubmit = async e => {
+    e.preventDefault();
+    const note = $('#req_note').value.trim();
+    dlg.close();
+    toast('Submitting request to admins...', 'info');
+    await requestAdminAccess(note);
+  };
+}
+
+async function requestAdminAccess(note = '') {
+  if (!currentUser || !currentUser.email) return;
+  const email = currentUser.email.toLowerCase().trim();
+  const name = currentUser.user_metadata?.full_name || email.split('@')[0];
+  const avatar = currentUser.user_metadata?.avatar_url || currentUser.user_metadata?.picture || null;
+
+  let user = appUsers.find(u => u.email && u.email.toLowerCase() === email);
+  if (user) {
+    user.status = 'pending';
+    user.name = name;
+    user.avatar = avatar;
+  } else {
+    user = { email, name, avatar, role: 'viewer', status: 'pending' };
+    appUsers.push(user);
+  }
+
+  if (supabaseClient) {
+    try {
+      const { error } = await supabaseClient
+        .from('app_users')
+        .upsert({
+          email,
+          name,
+          avatar,
+          role: 'viewer',
+          status: 'pending',
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'email' });
+
+      if (error) throw error;
+    } catch (err) {
+      console.error('Request admin error:', err);
+      toast(err.message || 'Error sending request', 'error');
+      return;
+    }
+  }
+
+  const logDetail = note ? `Note: "${note}"` : `New request submitted by ${name} (${email}).`;
+  await logActivity('Requested Admin Access', logDetail);
+
+  saveToLocalCache();
+  updateAuthUI();
+  render();
+  toast('Admin access request sent! Admins have been notified.', 'ok');
+}
+
 function openAdminModal() {
   if (!isUserAdmin()) {
     toast('Admin access required.', 'error');
@@ -1280,6 +1382,9 @@ document.addEventListener('click', async e => {
   else if (act === 'page') {
     page = id;
     render();
+  }
+  else if (act === 'req-admin') {
+    openRequestAdminDialog();
   }
   else if (act === 'allP') {
     await dbMarkAllPresent(attId);
