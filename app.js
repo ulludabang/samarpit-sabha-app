@@ -93,18 +93,18 @@ function toast(msg, type = 'info') {
 function isUserAdmin() {
   if (!currentUser || !currentUser.email) return false;
   const email = currentUser.email.toLowerCase().trim();
-  if (email === MASTER_ADMIN_EMAIL.toLowerCase()) return true;
+  if (email === MASTER_ADMIN_EMAIL.toLowerCase().trim()) return true;
 
-  const user = appUsers.find(u => u.email && u.email.toLowerCase() === email);
+  const user = appUsers.find(u => u.email && u.email.toLowerCase().trim() === email);
   return !!(user && user.role === 'admin' && user.status === 'approved');
 }
 
 function getUserStatus() {
   if (!currentUser || !currentUser.email) return 'unauthenticated';
   const email = currentUser.email.toLowerCase().trim();
-  if (email === MASTER_ADMIN_EMAIL.toLowerCase()) return 'admin';
+  if (email === MASTER_ADMIN_EMAIL.toLowerCase().trim()) return 'admin';
 
-  const user = appUsers.find(u => u.email && u.email.toLowerCase() === email);
+  const user = appUsers.find(u => u.email && u.email.toLowerCase().trim() === email);
   if (!user) return 'pending';
   if (user.role === 'admin' && user.status === 'approved') return 'admin';
   if (user.status === 'pending') return 'pending';
@@ -283,64 +283,115 @@ async function registerOrCheckUser() {
   const email = currentUser.email.toLowerCase().trim();
   const name = currentUser.user_metadata?.full_name || currentUser.email.split('@')[0];
   const avatar = currentUser.user_metadata?.avatar_url || currentUser.user_metadata?.picture || null;
-  const isMaster = email === MASTER_ADMIN_EMAIL.toLowerCase();
+  const isMaster = email === MASTER_ADMIN_EMAIL.toLowerCase().trim();
 
-  // 1. AUTOMATIC LOCAL REGISTRATION: Ensure user exists in memory & cache immediately
-  let user = appUsers.find(u => u.email && u.email.toLowerCase() === email);
-  if (!user) {
-    user = {
-      email,
-      name,
-      avatar,
-      role: isMaster ? 'admin' : 'viewer',
-      status: isMaster ? 'approved' : 'pending',
-      created_at: new Date().toISOString()
-    };
-    appUsers.push(user);
-    if (!isMaster) {
-      logActivity('Allowance Request Registered', `New user ${name} (${email}) logged in and was added to pending requests.`);
-    }
-  } else {
-    user.name = name;
-    if (avatar) user.avatar = avatar;
-    if (isMaster) {
-      user.role = 'admin';
-      user.status = 'approved';
-    }
-  }
-
-  saveToLocalCache();
-  updateAuthUI();
-
-  // 2. Persist to Supabase app_users table
+  // 1. Fetch user status directly from Supabase app_users table first
+  let cloudUser = null;
   if (supabaseClient) {
     try {
       const { data, error } = await supabaseClient
         .from('app_users')
-        .upsert({
-          email,
-          name,
-          avatar,
-          role: user.role,
-          status: user.status,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'email' })
-        .select();
+        .select('*')
+        .eq('email', email)
+        .maybeSingle();
 
-      if (error) {
-        dbMissingUsersTable = true;
-        console.warn('[Samarpit] app_users table missing or inaccessible:', error.message);
-      } else {
+      if (!error && data) {
+        cloudUser = data;
         dbMissingUsersTable = false;
+      } else if (!error && !data) {
+        dbMissingUsersTable = false;
+      } else if (error) {
+        console.warn('[Samarpit] Cloud check error:', error.message);
       }
     } catch (err) {
-      dbMissingUsersTable = true;
-      console.warn('[Samarpit] App user check warning:', err.message);
+      console.warn('[Samarpit] Cloud user lookup warning:', err.message);
+    }
+  }
+
+  let user = appUsers.find(u => u.email && u.email.toLowerCase().trim() === email);
+
+  if (cloudUser) {
+    // USER ALREADY EXISTS IN SUPABASE:
+    // CRITICAL: Always adopt the cloud role and status! Never downgrade an approved admin!
+    if (!user) {
+      user = { ...cloudUser };
+      appUsers.push(user);
+    } else {
+      user.role = cloudUser.role;
+      user.status = cloudUser.status;
+    }
+
+    user.name = name;
+    if (avatar) user.avatar = avatar;
+
+    if (isMaster) {
+      user.role = 'admin';
+      user.status = 'approved';
+    }
+
+    // Only update name and avatar metadata in Supabase (preserves existing admin role!)
+    if (supabaseClient) {
+      try {
+        await supabaseClient
+          .from('app_users')
+          .update({
+            name,
+            avatar,
+            role: user.role,
+            status: user.status,
+            updated_at: new Date().toISOString()
+          })
+          .eq('email', email);
+      } catch (e) {}
+    }
+  } else {
+    // TRULY NEW USER: Register as pending allowance request (or admin if master)
+    const initialRole = isMaster ? 'admin' : (user?.role || 'viewer');
+    const initialStatus = isMaster ? 'approved' : (user?.status || 'pending');
+
+    if (!user) {
+      user = {
+        email,
+        name,
+        avatar,
+        role: initialRole,
+        status: initialStatus,
+        created_at: new Date().toISOString()
+      };
+      appUsers.push(user);
+      if (!isMaster) {
+        logActivity('Allowance Request Registered', `New user ${name} (${email}) signed in and was added to pending requests.`);
+      }
+    } else {
+      user.name = name;
+      if (avatar) user.avatar = avatar;
+      if (isMaster) {
+        user.role = 'admin';
+        user.status = 'approved';
+      }
+    }
+
+    if (supabaseClient) {
+      try {
+        const { error } = await supabaseClient
+          .from('app_users')
+          .insert([{
+            email,
+            name,
+            avatar,
+            role: user.role,
+            status: user.status
+          }]);
+        if (!error) dbMissingUsersTable = false;
+      } catch (err) {
+        console.warn('[Samarpit] App user insert warning:', err.message);
+      }
     }
   }
 
   saveToLocalCache();
   updateAuthUI();
+  render();
 }
 
 async function approveUserAsAdmin(targetEmail) {
@@ -515,11 +566,28 @@ function setupRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'children' }, () => syncFromCloud())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'sabhas' }, () => syncFromCloud())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => syncFromCloud())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_users' }, () => syncUsersAndLogs())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_users' }, async () => {
+      console.log('[Samarpit] Realtime app_users change event received');
+      await syncUsersAndLogs();
+    })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'activity_logs' }, () => syncUsersAndLogs())
     .subscribe(status => {
       console.log('[Samarpit] Realtime subscription status:', status);
     });
+
+  // Also auto-sync whenever user focuses / returns to tab
+  window.addEventListener('focus', () => {
+    if (supabaseClient && currentUser) {
+      syncUsersAndLogs();
+    }
+  });
+
+  // Heartbeat poll: while a viewer is waiting for admin approval, check every 8 seconds
+  setInterval(() => {
+    if (supabaseClient && currentUser && !isUserAdmin()) {
+      syncUsersAndLogs();
+    }
+  }, 8000);
 }
 
 // ------------------------------------------------------------------------------
@@ -595,6 +663,8 @@ async function syncFromCloud() {
 async function syncUsersAndLogs() {
   if (!supabaseClient) return;
 
+  const wasAdmin = isUserAdmin();
+
   try {
     // 1. Fetch users from Supabase
     const { data: uData, error: uErr } = await supabaseClient
@@ -622,7 +692,7 @@ async function syncUsersAndLogs() {
     }
 
     // Always ensure master admin is in appUsers list
-    const master = appUsers.find(u => u.email && u.email.toLowerCase().trim() === MASTER_ADMIN_EMAIL.toLowerCase());
+    const master = appUsers.find(u => u.email && u.email.toLowerCase().trim() === MASTER_ADMIN_EMAIL.toLowerCase().trim());
     if (!master) {
       appUsers.push({ email: MASTER_ADMIN_EMAIL, name: 'Master Admin', role: 'admin', status: 'approved' });
     } else {
@@ -647,7 +717,11 @@ async function syncUsersAndLogs() {
 
     saveToLocalCache();
     updateAuthUI();
-    if (tab === 'logs') render();
+    render(); // Always re-render so admin buttons and permissions refresh immediately!
+
+    if (!wasAdmin && isUserAdmin() && currentUser) {
+      toast('🎉 You have been approved as Administrator!', 'ok');
+    }
   } catch (e) {
     console.warn('[Samarpit] Users and logs sync warning:', e);
   }
@@ -1300,12 +1374,20 @@ function openRequestAdminDialog() {
 
 async function requestAdminAccess(note = '') {
   if (!currentUser || !currentUser.email) return;
+  if (isUserAdmin()) {
+    toast('You already have Administrator permissions!', 'ok');
+    return;
+  }
   const email = currentUser.email.toLowerCase().trim();
-  const name = currentUser.user_metadata?.full_name || email.split('@')[0];
+  const name = currentUser.user_metadata?.full_name || currentUser.email.split('@')[0];
   const avatar = currentUser.user_metadata?.avatar_url || currentUser.user_metadata?.picture || null;
 
-  let user = appUsers.find(u => u.email && u.email.toLowerCase() === email);
+  let user = appUsers.find(u => u.email && u.email.toLowerCase().trim() === email);
   if (user) {
+    if (user.role === 'admin' && user.status === 'approved') {
+      toast('You are already an Admin.', 'ok');
+      return;
+    }
     user.status = 'pending';
     user.name = name;
     user.avatar = avatar;
