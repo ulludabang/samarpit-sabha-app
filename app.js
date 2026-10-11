@@ -1063,9 +1063,14 @@ async function dbSetAttendance(sabhaId, childId, status) {
     return;
   }
 
+  const sabha = S.sabhas.find(x => x.id === sabhaId);
+  if (isSabhaPast(sabha)) {
+    toast('Attendance is locked: Ended or past sabhas cannot be modified.', 'error');
+    return;
+  }
+
   const currentAtt = S.att[sabhaId] = S.att[sabhaId] || {};
   const child = S.children.find(x => x.id === childId);
-  const sabha = S.sabhas.find(x => x.id === sabhaId);
   const childName = child ? child.name : 'bhulku';
 
   if (status === null) {
@@ -1103,9 +1108,14 @@ async function dbMarkAllPresent(sabhaId) {
     return;
   }
 
+  const sabha = S.sabhas.find(x => x.id === sabhaId);
+  if (isSabhaPast(sabha)) {
+    toast('Attendance is locked: Ended or past sabhas cannot be modified.', 'error');
+    return;
+  }
+
   const a = S.att[sabhaId] = S.att[sabhaId] || {};
   const upsertRows = [];
-  const sabha = S.sabhas.find(x => x.id === sabhaId);
 
   S.children.forEach(k => {
     a[k.id] = 1;
@@ -1245,6 +1255,10 @@ function attView() {
     attId = (all.find(s => s.date <= t) || all[all.length - 1]).id;
   }
 
+  const selectedSabha = S.sabhas.find(s => s.id === attId);
+  const isPast = isSabhaPast(selectedSabha);
+  const canModifyAtt = isAdmin && !isPast;
+
   const a = S.att[attId] || {};
   const c = kids();
   const P = c.filter(k => a[k.id] === 1).length;
@@ -1252,10 +1266,20 @@ function attView() {
 
   h += `
   <label for="sel">Select Sabha</label>
-  <select id="sel">${all.map(s => `<option value="${s.id}"${s.id === attId ? ' selected' : ''}>${fmt(s.date)}: ${esc(s.topic)}${s.ended ? ' (Ended)' : ''}</option>`).join('')}</select>
+  <select id="sel">${all.map(s => `<option value="${s.id}"${s.id === attId ? ' selected' : ''}>${fmt(s.date)}: ${esc(s.topic)}${s.ended ? ' (Ended)' : isSabhaPast(s) ? ' (Past)' : ''}</option>`).join('')}</select>`;
+
+  if (isPast) {
+    h += `
+    <div style="background:#fee2e2; border:1px solid #fca5a5; color:#991b1b; padding:10px 14px; border-radius:10px; margin:14px 0 6px; display:flex; align-items:center; gap:8px;">
+      <span style="font-size:18px;">🔒</span>
+      <span style="font-size:13.5px; line-height:1.4;"><strong>Attendance Locked:</strong> This sabha has ended. Records are finalized and view-only.</span>
+    </div>`;
+  }
+
+  h += `
   <div class="row" style="margin:14px 0">
     <span class="meta"><strong>${P}</strong> present, <strong>${A}</strong> absent, <strong>${c.length - P - A}</strong> not marked</span>
-    ${isAdmin ? '<button class="btn ghost sm" data-act="allP">Mark All Present</button>' : ''}
+    ${canModifyAtt ? '<button class="btn ghost sm" data-act="allP">Mark All Present</button>' : ''}
   </div>`;
 
   return h + c.map(k => `
@@ -1264,9 +1288,9 @@ function attView() {
       <strong>${esc(k.name)}</strong>
       ${k.cls ? `<br><span class="meta">${esc(k.cls)}</span>` : ''}
     </span>
-    <div class="seg" role="group" aria-label="Attendance for ${esc(k.name)}" style="${isAdmin ? '' : 'pointer-events:none;'}">
-      <button ${isAdmin ? `data-act="mark" data-id="${k.id}" data-v="1"` : 'type="button"'} aria-pressed="${a[k.id] === 1}" class="${a[k.id] === 1 ? 'on-p' : ''}">Present</button>
-      <button ${isAdmin ? `data-act="mark" data-id="${k.id}" data-v="0"` : 'type="button"'} aria-pressed="${a[k.id] === 0}" class="${a[k.id] === 0 ? 'on-a' : ''}">Absent</button>
+    <div class="seg" role="group" aria-label="Attendance for ${esc(k.name)}" style="${canModifyAtt ? '' : 'pointer-events:none; opacity:0.85; cursor:not-allowed;'}">
+      <button ${canModifyAtt ? `data-act="mark" data-id="${k.id}" data-v="1"` : 'type="button" disabled'} aria-pressed="${a[k.id] === 1}" class="${a[k.id] === 1 ? 'on-p' : ''}">Present</button>
+      <button ${canModifyAtt ? `data-act="mark" data-id="${k.id}" data-v="0"` : 'type="button" disabled'} aria-pressed="${a[k.id] === 0}" class="${a[k.id] === 0 ? 'on-a' : ''}">Absent</button>
     </div>
   </div>`).join('');
 }
@@ -1916,11 +1940,21 @@ document.addEventListener('click', async e => {
     openRequestAdminDialog();
   }
   else if (act === 'allP') {
+    const s = S.sabhas.find(x => x.id === attId);
+    if (isSabhaPast(s)) {
+      toast('Attendance is locked: Ended or past sabhas cannot be modified.', 'error');
+      return;
+    }
     await dbMarkAllPresent(attId);
   }
   else if (act === 'mark') {
     if (!isUserAdmin()) {
       toast('View-only access: Only admins can mark attendance.', 'error');
+      return;
+    }
+    const s = S.sabhas.find(x => x.id === attId);
+    if (isSabhaPast(s)) {
+      toast('Attendance is locked: Ended or past sabhas cannot be modified.', 'error');
       return;
     }
     const a = S.att[attId] = S.att[attId] || {};
