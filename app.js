@@ -528,6 +528,16 @@ async function revokeAdminAccess(targetEmail) {
 // 4. Activity Audit Logging
 // ------------------------------------------------------------------------------
 
+const LOGS_RESET_TIMESTAMP = '2026-10-11T10:25:00.000Z';
+
+function getLogsMinTimestamp() {
+  const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  let manualClear = null;
+  try { manualClear = localStorage.getItem('samarpit_logs_cleared_at'); } catch (e) {}
+  const effectiveBase = manualClear || LOGS_RESET_TIMESTAMP;
+  return cutoff24h > effectiveBase ? cutoff24h : effectiveBase;
+}
+
 async function logActivity(action, details = '') {
   const email = currentUser?.email || 'System';
   const name = currentUser?.user_metadata?.full_name || email.split('@')[0];
@@ -543,9 +553,9 @@ async function logActivity(action, details = '') {
     created_at: new Date().toISOString()
   };
 
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const minTimeMs = new Date(getLogsMinTimestamp()).getTime();
   activityLogs.unshift(entry);
-  activityLogs = activityLogs.filter(l => !l.created_at || new Date(l.created_at).getTime() >= cutoff);
+  activityLogs = activityLogs.filter(l => l.created_at && new Date(l.created_at).getTime() >= minTimeMs);
   if (activityLogs.length > 200) activityLogs.pop();
 
   if (supabaseClient && currentUser) {
@@ -803,20 +813,20 @@ async function syncUsersAndLogs(shouldRender = true) {
       master.status = 'approved';
     }
 
-    // 2. Fetch activity logs from Supabase (Rolling 24-hour window)
-    const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    // 2. Fetch activity logs from Supabase
+    const queryCutoff = getLogsMinTimestamp();
     const { data: lData, error: lErr } = await supabaseClient
       .from('activity_logs')
       .select('*')
-      .gte('created_at', cutoff24h)
+      .gte('created_at', queryCutoff)
       .order('created_at', { ascending: false })
       .limit(200);
 
-    // Opportunistically purge database logs older than 24h
+    // Opportunistically purge database logs older than queryCutoff
     supabaseClient
       .from('activity_logs')
       .delete()
-      .lt('created_at', cutoff24h)
+      .lt('created_at', queryCutoff)
       .then(({ error }) => {
         if (error && error.code !== '42501') console.debug('[Samarpit] Cloud log purge notice:', error.message);
       })
@@ -825,10 +835,10 @@ async function syncUsersAndLogs(shouldRender = true) {
     if (lErr) {
       console.warn('[Samarpit] activity_logs query warning:', lErr.message);
     } else if (lData) {
-      const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+      const minMs = new Date(queryCutoff).getTime();
       const cloudIds = new Set(lData.map(l => l.id));
-      const localOnly = activityLogs.filter(l => !cloudIds.has(l.id) && (!l.created_at || new Date(l.created_at).getTime() >= cutoffMs));
-      activityLogs = [...lData, ...localOnly].filter(l => !l.created_at || new Date(l.created_at).getTime() >= cutoffMs).slice(0, 200);
+      const localOnly = activityLogs.filter(l => !cloudIds.has(l.id) && l.created_at && new Date(l.created_at).getTime() >= minMs);
+      activityLogs = [...lData, ...localOnly].filter(l => l.created_at && new Date(l.created_at).getTime() >= minMs).slice(0, 200);
     }
 
     saveToLocalCache();
@@ -867,14 +877,40 @@ function loadLocalCache() {
 
     const rawLogs = localStorage.getItem(STORAGE_KEYS.LOGS);
     if (rawLogs) {
-      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      const minMs = new Date(getLogsMinTimestamp()).getTime();
       const parsed = JSON.parse(rawLogs);
-      activityLogs = Array.isArray(parsed) ? parsed.filter(l => !l.created_at || new Date(l.created_at).getTime() >= cutoff) : [];
+      activityLogs = Array.isArray(parsed) ? parsed.filter(l => l.created_at && new Date(l.created_at).getTime() >= minMs) : [];
     }
 
     const rawUsers = localStorage.getItem(STORAGE_KEYS.USERS);
     if (rawUsers) appUsers = JSON.parse(rawUsers);
   } catch (e) {}
+}
+
+async function handleClearLogs() {
+  if (!isUserAdmin()) {
+    toast('Permission denied: Only admins can clear logs.', 'error');
+    return;
+  }
+  if (!confirm('Are you sure you want to empty all activity logs?')) return;
+
+  const nowIso = new Date().toISOString();
+  try { localStorage.setItem('samarpit_logs_cleared_at', nowIso); } catch (e) {}
+  activityLogs = [];
+  try { localStorage.setItem(STORAGE_KEYS.LOGS, '[]'); } catch (e) {}
+
+  if (supabaseClient && currentUser) {
+    try {
+      await supabaseClient.from('activity_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    } catch (e) {
+      console.warn('[Samarpit] Cloud log deletion error:', e);
+    }
+  }
+
+  saveToLocalCache();
+  render();
+  toast('All activity logs have been emptied', 'ok');
+  broadcastChange('logs_cleared');
 }
 
 // ------------------------------------------------------------------------------
@@ -1358,8 +1394,9 @@ function kidList() {
 }
 
 function logsView() {
+  const isAdmin = isUserAdmin();
   let h = `
-  <div class="row" style="margin-top:14px; align-items: flex-start; justify-content: space-between;">
+  <div class="row" style="margin-top:14px; align-items: flex-start; justify-content: space-between; gap:10px; flex-wrap:wrap;">
     <div>
       <div style="display:flex; align-items:center; gap:8px;">
         <h2 style="margin:0">Activity Audit Logs</h2>
@@ -1367,12 +1404,15 @@ function logsView() {
       </div>
       <p class="sub" style="margin:4px 0 0;">Recent actions across the mandal • Logs automatically purge after 24 hours</p>
     </div>
-    <button class="btn ghost sm" id="btn-refresh-logs">Refresh</button>
+    <div style="display:flex; gap:8px;">
+      <button class="btn ghost sm" id="btn-refresh-logs">Refresh</button>
+      ${isAdmin && activityLogs.length > 0 ? '<button class="btn ghost sm danger" id="btn-clear-logs" title="Empty all activity logs">Clear Logs</button>' : ''}
+    </div>
   </div>
   <div style="margin-top:16px;"></div>`;
 
   if (!activityLogs.length) {
-    return h + empty('No activity logs in the last 24 hours', 'Actions such as creating sabhas, adding bhulkus, and marking attendance from the past 24 hours will appear here.');
+    return h + empty('No activity logs recorded', 'Actions such as creating sabhas, adding bhulkus, and marking attendance will appear here.');
   }
 
   return h + activityLogs.map(log => {
@@ -1445,6 +1485,8 @@ function render() {
     mainView.innerHTML = tab === 'sabha' ? sabhaView() : tab === 'att' ? attView() : tab === 'kids' ? kidsView() : logsView();
     const btnRefreshLogs = $('#btn-refresh-logs');
     if (btnRefreshLogs) btnRefreshLogs.onclick = () => syncUsersAndLogs();
+    const btnClearLogs = $('#btn-clear-logs');
+    if (btnClearLogs) btnClearLogs.onclick = handleClearLogs;
   }
 }
 
