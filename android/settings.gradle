@@ -1,0 +1,2 @@
+rootProject.name = "SamarpitSabha"
+include ':app'
