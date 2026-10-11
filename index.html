@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ec7a0c">
+  <meta name="description" content="SAMARPIT IRANIWADI - Bhulku records, attendance and sabha schedule management with Google OAuth and zero-cost cloud database.">
+  <title>SAMARPIT IRANIWADI - Sabha & Bhulku Register</title>
+
+  <!-- Typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Hind:wght@400;500;600;700&display=swap">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="styles.css">
+
+  <!-- Supabase Client Library (100% Free Tier Cloud PostgreSQL & OAuth) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <!-- Toast Notifications Container -->
+  <div id="toast-container" aria-live="polite"></div>
+
+  <!-- Top Hero Header -->
+  <header class="hero">
+    <div class="hero-top">
+      <div>
+        <h1>SAMARPIT IRANIWADI</h1>
+        <p class="sub">Bhulku records, attendance and sabha schedule</p>
+      </div>
+      <div class="auth-header">
+        <button id="btn-settings" class="btn icon-only" title="Database & Cloud Settings" aria-label="Settings">
+          ⚙️
+        </button>
+        <div id="auth-status">
+          <!-- Populated dynamically: Google Sign-in OR User Profile badge -->
+        </div>
+      </div>
+    </div>
+    <div style="margin-top: 8px; display: flex; align-items: center; justify-content: space-between;">
+      <span id="status-badge" class="chip-status offline" title="Connection status">○ Local / Demo Mode</span>
+    </div>
+  </header>
+
+  <!-- Main View Container -->
+  <div class="wrap">
+    <main id="view" role="main"></main>
+  </div>
+
+  <!-- Bottom Navigation Bar for Mobile and Desktop -->
+  <nav class="tabs" aria-label="Sections">
+    <button data-tab="sabha" aria-current="true">
+      <span style="font-size:18px;">📅</span>
+      <span>Sabha</span>
+    </button>
+    <button data-tab="att">
+      <span style="font-size:18px;">✅</span>
+      <span>Attendance</span>
+    </button>
+    <button data-tab="kids">
+      <span style="font-size:18px;">🧒</span>
+      <span>Bhulku</span>
+    </button>
+  </nav>
+
+  <!-- Dialog for Add/Edit Forms & Settings -->
+  <dialog id="dlg" aria-modal="true"></dialog>
+
+  <!-- Configuration and App Script -->
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

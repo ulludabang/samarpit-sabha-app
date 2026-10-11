@@ -1,0 +1,15 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.vscode/
+.idea/
+
+# Vercel deployment folder
+.vercel
