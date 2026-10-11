@@ -204,6 +204,25 @@ CREATE POLICY "Allow select activity_logs" ON public.activity_logs FOR SELECT US
 DROP POLICY IF EXISTS "Allow insert activity_logs" ON public.activity_logs;
 CREATE POLICY "Allow insert activity_logs" ON public.activity_logs FOR INSERT WITH CHECK (true);
 
+DROP POLICY IF EXISTS "Allow delete activity_logs" ON public.activity_logs;
+CREATE POLICY "Allow delete activity_logs" ON public.activity_logs FOR DELETE USING (true);
+
+-- Auto-purge activity logs older than 24 hours
+CREATE OR REPLACE FUNCTION public.trigger_purge_old_activity_logs()
+RETURNS TRIGGER AS $$
+BEGIN
+    DELETE FROM public.activity_logs
+    WHERE created_at < timezone('utc'::text, now()) - interval '24 hours';
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_purge_old_activity_logs ON public.activity_logs;
+CREATE TRIGGER trg_purge_old_activity_logs
+    AFTER INSERT ON public.activity_logs
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION public.trigger_purge_old_activity_logs();
+
 -- 11. Enable Replica Identity Full for Realtime
 ALTER TABLE public.children REPLICA IDENTITY FULL;
 ALTER TABLE public.sabhas REPLICA IDENTITY FULL;

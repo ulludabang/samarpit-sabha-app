@@ -542,7 +542,9 @@ async function logActivity(action, details = '') {
     created_at: new Date().toISOString()
   };
 
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   activityLogs.unshift(entry);
+  activityLogs = activityLogs.filter(l => !l.created_at || new Date(l.created_at).getTime() >= cutoff);
   if (activityLogs.length > 200) activityLogs.pop();
 
   if (supabaseClient && currentUser) {
@@ -795,19 +797,32 @@ async function syncUsersAndLogs(shouldRender = true) {
       master.status = 'approved';
     }
 
-    // 2. Fetch activity logs from Supabase
+    // 2. Fetch activity logs from Supabase (Rolling 24-hour window)
+    const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: lData, error: lErr } = await supabaseClient
       .from('activity_logs')
       .select('*')
+      .gte('created_at', cutoff24h)
       .order('created_at', { ascending: false })
-      .limit(100);
+      .limit(200);
+
+    // Opportunistically purge database logs older than 24h
+    supabaseClient
+      .from('activity_logs')
+      .delete()
+      .lt('created_at', cutoff24h)
+      .then(({ error }) => {
+        if (error && error.code !== '42501') console.debug('[Samarpit] Cloud log purge notice:', error.message);
+      })
+      .catch(() => {});
 
     if (lErr) {
       console.warn('[Samarpit] activity_logs query warning:', lErr.message);
     } else if (lData) {
+      const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
       const cloudIds = new Set(lData.map(l => l.id));
-      const localOnly = activityLogs.filter(l => !cloudIds.has(l.id));
-      activityLogs = [...lData, ...localOnly].slice(0, 150);
+      const localOnly = activityLogs.filter(l => !cloudIds.has(l.id) && (!l.created_at || new Date(l.created_at).getTime() >= cutoffMs));
+      activityLogs = [...lData, ...localOnly].filter(l => !l.created_at || new Date(l.created_at).getTime() >= cutoffMs).slice(0, 200);
     }
 
     saveToLocalCache();
@@ -845,7 +860,11 @@ function loadLocalCache() {
     if (rawState) S = Object.assign(S, JSON.parse(rawState));
 
     const rawLogs = localStorage.getItem(STORAGE_KEYS.LOGS);
-    if (rawLogs) activityLogs = JSON.parse(rawLogs);
+    if (rawLogs) {
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      const parsed = JSON.parse(rawLogs);
+      activityLogs = Array.isArray(parsed) ? parsed.filter(l => !l.created_at || new Date(l.created_at).getTime() >= cutoff) : [];
+    }
 
     const rawUsers = localStorage.getItem(STORAGE_KEYS.USERS);
     if (rawUsers) appUsers = JSON.parse(rawUsers);
@@ -1256,17 +1275,20 @@ function kidList() {
 
 function logsView() {
   let h = `
-  <div class="row" style="margin-top:14px">
+  <div class="row" style="margin-top:14px; align-items: flex-start; justify-content: space-between;">
     <div>
-      <h2 style="margin:0">Activity Audit Logs</h2>
-      <p class="sub" style="margin:2px 0 0;">Record of actions performed across the mandal</p>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <h2 style="margin:0">Activity Audit Logs</h2>
+        <span style="font-size:11px; font-weight:700; color:var(--pri); background:var(--pri-lt); padding:3px 8px; border-radius:99px; letter-spacing:0.3px;">⏳ Rolling 24h</span>
+      </div>
+      <p class="sub" style="margin:4px 0 0;">Recent actions across the mandal • Logs automatically purge after 24 hours</p>
     </div>
     <button class="btn ghost sm" id="btn-refresh-logs">Refresh</button>
   </div>
   <div style="margin-top:16px;"></div>`;
 
   if (!activityLogs.length) {
-    return h + empty('No activity logs recorded yet', 'Actions such as creating sabhas, adding bhulkus, and marking attendance will be logged here.');
+    return h + empty('No activity logs in the last 24 hours', 'Actions such as creating sabhas, adding bhulkus, and marking attendance from the past 24 hours will appear here.');
   }
 
   return h + activityLogs.map(log => {
@@ -1611,6 +1633,25 @@ CREATE POLICY "Allow select activity_logs" ON public.activity_logs FOR SELECT US
 
 DROP POLICY IF EXISTS "Allow insert activity_logs" ON public.activity_logs;
 CREATE POLICY "Allow insert activity_logs" ON public.activity_logs FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow delete activity_logs" ON public.activity_logs;
+CREATE POLICY "Allow delete activity_logs" ON public.activity_logs FOR DELETE USING (true);
+
+-- Auto-purge activity logs older than 24 hours
+CREATE OR REPLACE FUNCTION public.trigger_purge_old_activity_logs()
+RETURNS TRIGGER AS $$
+BEGIN
+    DELETE FROM public.activity_logs
+    WHERE created_at < timezone('utc'::text, now()) - interval '24 hours';
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_purge_old_activity_logs ON public.activity_logs;
+CREATE TRIGGER trg_purge_old_activity_logs
+    AFTER INSERT ON public.activity_logs
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION public.trigger_purge_old_activity_logs();
 
 ALTER TABLE public.children REPLICA IDENTITY FULL;
 ALTER TABLE public.sabhas REPLICA IDENTITY FULL;
