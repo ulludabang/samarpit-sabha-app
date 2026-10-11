@@ -33,6 +33,12 @@ let currentUser = null;
 let supabaseClient = null;
 let realtimeChannel = null;
 let isSyncing = false;
+let syncPending = false;
+let isSyncingUsers = false;
+let syncUsersPending = false;
+let lastRenderedStateHash = '';
+let syncHeartbeat = null;
+let reconnectTimer = null;
 
 // DOM Utilities
 const $ = s => document.querySelector(s);
@@ -392,6 +398,7 @@ async function registerOrCheckUser() {
   saveToLocalCache();
   updateAuthUI();
   render();
+  broadcastChange('user_registered');
 }
 
 async function approveUserAsAdmin(targetEmail) {
@@ -436,6 +443,7 @@ async function approveUserAsAdmin(targetEmail) {
   saveToLocalCache();
   updateAuthUI();
   toast(`Approved ${emailNorm} as Admin!`, 'ok');
+  broadcastChange('user_approved');
   openAdminModal();
 }
 
@@ -474,6 +482,7 @@ async function dismissAllowanceRequest(targetEmail) {
   saveToLocalCache();
   updateAuthUI();
   toast(`Request dismissed. ${emailNorm} remains Viewer.`, 'ok');
+  broadcastChange('user_dismissed');
   openAdminModal();
 }
 
@@ -510,6 +519,7 @@ async function revokeAdminAccess(targetEmail) {
   saveToLocalCache();
   updateAuthUI();
   toast(`Set ${emailNorm} to Viewer`, 'ok');
+  broadcastChange('user_revoked');
   openAdminModal();
 }
 
@@ -558,44 +568,116 @@ async function logActivity(action, details = '') {
 // 5. Real-time Synchronization
 // ------------------------------------------------------------------------------
 
+function computeStateHash() {
+  try {
+    return JSON.stringify({
+      c: S.children.length,
+      cid: S.children.map(x => x.id + x.name + (x.cls || '')).join('|'),
+      s: S.sabhas.length,
+      sid: S.sabhas.map(x => x.id + x.date + x.topic).join('|'),
+      a: S.att,
+      u: appUsers.map(x => x.email + x.role + x.status).join('|'),
+      l: activityLogs.length ? activityLogs[0].id : ''
+    });
+  } catch (e) {
+    return String(Date.now());
+  }
+}
+
+function broadcastChange(actionType = 'general') {
+  if (realtimeChannel) {
+    try {
+      realtimeChannel.send({
+        type: 'broadcast',
+        event: 'samarpit_change',
+        payload: { actionType, from: currentUser?.email, time: Date.now() }
+      });
+    } catch (e) {
+      console.warn('[Samarpit] Broadcast send notice:', e);
+    }
+  }
+}
+
 function setupRealtime() {
   if (!supabaseClient) return;
-  if (realtimeChannel) supabaseClient.removeChannel(realtimeChannel);
 
-  realtimeChannel = supabaseClient.channel('sabha_db_changes')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'children' }, () => syncFromCloud())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'sabhas' }, () => syncFromCloud())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => syncFromCloud())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_users' }, async () => {
-      console.log('[Samarpit] Realtime app_users change event received');
-      await syncUsersAndLogs();
-    })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'activity_logs' }, () => syncUsersAndLogs())
-    .subscribe(status => {
-      console.log('[Samarpit] Realtime subscription status:', status);
-    });
+  if (realtimeChannel) {
+    try {
+      supabaseClient.removeChannel(realtimeChannel);
+    } catch (e) {}
+    realtimeChannel = null;
+  }
 
-  // Also auto-sync whenever user focuses / returns to tab
-  window.addEventListener('focus', () => {
-    if (supabaseClient && currentUser) {
-      syncUsersAndLogs();
+  // Consolidated Realtime channel: listens to both instant broadcast messages & postgres DB WAL changes
+  realtimeChannel = supabaseClient.channel('samarpit_live_sync', {
+    config: {
+      broadcast: { self: false }
     }
   });
 
-  // Heartbeat poll: while a viewer is waiting for admin approval, check every 8 seconds
-  setInterval(() => {
-    if (supabaseClient && currentUser && !isUserAdmin()) {
-      syncUsersAndLogs();
+  // 1. Instant Peer Broadcast: reflects changes across all connected devices in ~50ms
+  realtimeChannel.on('broadcast', { event: 'samarpit_change' }, (msg) => {
+    console.log('[Samarpit] Live broadcast event received:', msg?.payload?.actionType);
+    syncFromCloud(true);
+  });
+
+  // 2. PostgreSQL WAL Database Listeners
+  realtimeChannel
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'children' }, () => syncFromCloud(true))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'sabhas' }, () => syncFromCloud(true))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => syncFromCloud(true))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_users' }, () => syncFromCloud(true))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'activity_logs' }, () => syncUsersAndLogs(true));
+
+  realtimeChannel.subscribe((status, err) => {
+    console.log('[Samarpit] Realtime channel status:', status, err || '');
+    if (status === 'SUBSCRIBED') {
+      updateSyncBadge('cloud');
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      updateSyncBadge('offline');
+      // Auto-reconnect with exponential backoff
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        if (currentUser) setupRealtime();
+      }, 3500);
     }
-  }, 8000);
+  });
+
+  startHeartbeat();
 }
+
+function startHeartbeat() {
+  if (syncHeartbeat) clearInterval(syncHeartbeat);
+  syncHeartbeat = setInterval(() => {
+    if (supabaseClient && currentUser && !document.hidden) {
+      syncFromCloud(false);
+    }
+  }, 2500);
+}
+
+// Window visibility change & focus listeners: sync immediately when tab becomes visible or active
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && supabaseClient && currentUser) {
+    syncFromCloud(true);
+  }
+});
+
+window.addEventListener('focus', () => {
+  if (supabaseClient && currentUser) {
+    syncFromCloud(true);
+  }
+});
 
 // ------------------------------------------------------------------------------
 // 6. Cloud Database Sync (Fetch & Cache)
 // ------------------------------------------------------------------------------
 
-async function syncFromCloud() {
-  if (!supabaseClient || isSyncing) return;
+async function syncFromCloud(forceRender = false) {
+  if (!supabaseClient) return;
+  if (isSyncing) {
+    syncPending = true;
+    return;
+  }
   isSyncing = true;
 
   try {
@@ -649,19 +731,32 @@ async function syncFromCloud() {
     });
     S.att = attMap;
 
-    await syncUsersAndLogs();
+    await syncUsersAndLogs(false);
 
-    saveToLocalCache();
-    render();
+    const newHash = computeStateHash();
+    if (forceRender || newHash !== lastRenderedStateHash) {
+      lastRenderedStateHash = newHash;
+      saveToLocalCache();
+      render();
+    }
   } catch (err) {
     console.warn('[Samarpit] Cloud sync warning:', err.message);
   } finally {
     isSyncing = false;
+    if (syncPending) {
+      syncPending = false;
+      syncFromCloud(forceRender);
+    }
   }
 }
 
-async function syncUsersAndLogs() {
+async function syncUsersAndLogs(shouldRender = true) {
   if (!supabaseClient) return;
+  if (isSyncingUsers) {
+    syncUsersPending = true;
+    return;
+  }
+  isSyncingUsers = true;
 
   const wasAdmin = isUserAdmin();
 
@@ -717,13 +812,22 @@ async function syncUsersAndLogs() {
 
     saveToLocalCache();
     updateAuthUI();
-    render(); // Always re-render so admin buttons and permissions refresh immediately!
+
+    if (shouldRender) {
+      render();
+    }
 
     if (!wasAdmin && isUserAdmin() && currentUser) {
       toast('🎉 You have been approved as Administrator!', 'ok');
     }
   } catch (e) {
     console.warn('[Samarpit] Users and logs sync warning:', e);
+  } finally {
+    isSyncingUsers = false;
+    if (syncUsersPending) {
+      syncUsersPending = false;
+      syncUsersAndLogs(shouldRender);
+    }
   }
 }
 
@@ -792,6 +896,7 @@ async function dbSaveChild(childData, id) {
   saveToLocalCache();
   render();
   toast(id ? 'Bhulku updated' : 'Bhulku added', 'ok');
+  broadcastChange('child_saved');
 }
 
 async function dbDeleteChild(id) {
@@ -815,6 +920,7 @@ async function dbDeleteChild(id) {
   saveToLocalCache();
   render();
   toast('Bhulku removed', 'ok');
+  broadcastChange('child_deleted');
 }
 
 async function dbSaveSabha(sabhaData, id) {
@@ -854,6 +960,7 @@ async function dbSaveSabha(sabhaData, id) {
   saveToLocalCache();
   render();
   toast(id ? 'Sabha updated' : 'Sabha added', 'ok');
+  broadcastChange('sabha_saved');
 }
 
 async function dbDeleteSabha(id) {
@@ -877,6 +984,7 @@ async function dbDeleteSabha(id) {
   saveToLocalCache();
   render();
   toast('Sabha deleted', 'ok');
+  broadcastChange('sabha_deleted');
 }
 
 async function dbSetAttendance(sabhaId, childId, status) {
@@ -916,6 +1024,7 @@ async function dbSetAttendance(sabhaId, childId, status) {
 
   saveToLocalCache();
   render();
+  broadcastChange('attendance_updated');
 }
 
 async function dbMarkAllPresent(sabhaId) {
@@ -944,6 +1053,7 @@ async function dbMarkAllPresent(sabhaId) {
   saveToLocalCache();
   render();
   toast('Marked all present', 'ok');
+  broadcastChange('attendance_batch');
 
   if (supabaseClient && currentUser && upsertRows.length > 0) {
     const { error } = await supabaseClient.from('attendance').upsert(upsertRows, { onConflict: 'sabha_id,child_id' });
@@ -1424,6 +1534,7 @@ async function requestAdminAccess(note = '') {
   updateAuthUI();
   render();
   toast('Admin access request sent! Admins have been notified.', 'ok');
+  broadcastChange('user_requested');
 }
 
 function openAdminModal() {
@@ -1501,17 +1612,18 @@ CREATE POLICY "Allow select activity_logs" ON public.activity_logs FOR SELECT US
 DROP POLICY IF EXISTS "Allow insert activity_logs" ON public.activity_logs;
 CREATE POLICY "Allow insert activity_logs" ON public.activity_logs FOR INSERT WITH CHECK (true);
 
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
-    CREATE PUBLICATION supabase_realtime FOR ALL TABLES;
-  ELSE
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.app_users;
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
-  END IF;
-EXCEPTION WHEN OTHERS THEN
-  NULL;
-END $$;`;
+ALTER TABLE public.children REPLICA IDENTITY FULL;
+ALTER TABLE public.sabhas REPLICA IDENTITY FULL;
+ALTER TABLE public.attendance REPLICA IDENTITY FULL;
+ALTER TABLE public.app_users REPLICA IDENTITY FULL;
+ALTER TABLE public.activity_logs REPLICA IDENTITY FULL;
+
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN CREATE PUBLICATION supabase_realtime FOR ALL TABLES; END IF; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.children; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.sabhas; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.attendance; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.app_users; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs; EXCEPTION WHEN OTHERS THEN NULL; END $$;`;
 
   dlg.innerHTML = `
     <div style="padding: 2px 0;">

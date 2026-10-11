@@ -204,18 +204,23 @@ CREATE POLICY "Allow select activity_logs" ON public.activity_logs FOR SELECT US
 DROP POLICY IF EXISTS "Allow insert activity_logs" ON public.activity_logs;
 CREATE POLICY "Allow insert activity_logs" ON public.activity_logs FOR INSERT WITH CHECK (true);
 
--- 11. Realtime Publication for instant multi-device live sync
+-- 11. Enable Replica Identity Full for Realtime
+ALTER TABLE public.children REPLICA IDENTITY FULL;
+ALTER TABLE public.sabhas REPLICA IDENTITY FULL;
+ALTER TABLE public.attendance REPLICA IDENTITY FULL;
+ALTER TABLE public.app_users REPLICA IDENTITY FULL;
+ALTER TABLE public.activity_logs REPLICA IDENTITY FULL;
+
+-- 12. Realtime Publication for instant multi-device live sync
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
     CREATE PUBLICATION supabase_realtime FOR ALL TABLES;
-  ELSE
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.children;
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.sabhas;
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.attendance;
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.app_users;
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
   END IF;
-EXCEPTION WHEN OTHERS THEN
-  NULL;
 END $$;
+
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.children; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.sabhas; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.attendance; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.app_users; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs; EXCEPTION WHEN OTHERS THEN NULL; END $$;
