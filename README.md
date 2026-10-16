@@ -34,14 +34,10 @@ samarpit-sabha-app/
 
 ## 🚀 Quick Local Preview
 
-You can preview the app locally right away using Python:
+You can preview the app right away using :
+ ##https://samarpit-sabha-app.vercel.app/
 
-```bash
-# In this directory:
-python -m http.server 3000
-```
-
-Then open https://samarpit-sabha-app.vercel.app/ in your web browser.
+in your web browser.
 
 ---
 
