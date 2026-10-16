@@ -41,7 +41,7 @@ You can preview the app locally right away using Python:
 python -m http.server 3000
 ```
 
-Then open [http://localhost:3000](http://localhost:3000) in your web browser.
+Then open https://samarpit-sabha-app.vercel.app/ in your web browser.
 
 ---
 
