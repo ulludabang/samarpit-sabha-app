@@ -1,4 +1,4 @@
-# SAMARPIT IRANIWADI - Sabha & Bhulku Register
+## SAMARPIT IRANIWADI - Sabha & Bhulku Register
 
 A responsive, high-performance web application for tracking children (Bhulku) directory, sabha attendance, and event schedules. Built with a modern, zero-cost cloud architecture using **Vercel**, **Supabase (PostgreSQL)**, and **Google OAuth 2.0**.
 
@@ -35,7 +35,7 @@ samarpit-sabha-app/
 ## 🚀 Quick Local Preview
 
 You can preview the app right away using :
- ##https://samarpit-sabha-app.vercel.app/
+ https://samarpit-sabha-app.vercel.app/
 
 in your web browser.
 
